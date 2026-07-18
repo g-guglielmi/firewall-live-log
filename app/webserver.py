@@ -53,26 +53,31 @@ def _filters_from(params):
 def _stats(state):
     def run(db):
         now = int(time.time())
-        total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-        last_min = db.execute("SELECT COUNT(*) FROM events WHERE ts >= ?",
-                              (now - 60,)).fetchone()[0]
+        # Scan-free: per-device totals/last-seen come from the writer's
+        # incrementally-maintained meta; only the current-rate query touches
+        # the events table, and it's an indexed range over the last 60 s.
+        dev_stats = json.loads(store.meta_get(db, "dev_stats", "{}"))
+        recent = {r[0]: r[1] for r in db.execute(
+            "SELECT device, COUNT(*) FROM events WHERE ts >= ? GROUP BY device",
+            (now - 60,))}
         span = db.execute("SELECT MIN(ts), MAX(ts) FROM events").fetchone()
-        per_device = {r[0]: r[1] for r in db.execute(
-            "SELECT device, COUNT(*) FROM events GROUP BY device")}
-        active = {r[0] for r in db.execute(
-            "SELECT DISTINCT device FROM events WHERE ts >= ?", (now - 300,))}
         unparsed = db.execute("SELECT COUNT(*) FROM unparsed").fetchone()[0]
+        devices = []
+        for d in state.devices:
+            ds = dev_stats.get(d.name, {})
+            devices.append({**d.as_dict(),
+                            "events": ds.get("total", 0),
+                            "last_seen": ds.get("last_seen"),
+                            "events_last_min": recent.get(d.name, 0)})
         return {
-            "total": total, "events_last_min": last_min,
+            "events_last_min": sum(recent.values()),
             "oldest": span[0], "newest": span[1],
             "retention_days": state.cfg.retention_days,
             "max_events": state.cfg.max_events,
             "unparsed": unparsed,
             "parsed": int(store.meta_get(db, "stat_parsed", "0")),
             "dropped": int(store.meta_get(db, "stat_dropped", "0")),
-            "devices": [{**d.as_dict(),
-                         "events": per_device.get(d.name, 0),
-                         "active": d.name in active} for d in state.devices],
+            "devices": devices,
             "now": now,
         }
     return state.query(run)

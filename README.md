@@ -11,16 +11,23 @@ Firewall** (SFOS v18–v22, key=value logs) simultaneously, with automatic
 per-port vendor detection. Events are kept in SQLite with time-based
 retention so you also get short-term history and CSV export.
 
+- **Overview at a glance** — the landing page shows every configured
+  system with a **receiving / quiet / stale / no-data** status, current
+  rate, and last-seen time, so you can tell instantly whether a firewall
+  has stopped sending. Each system also gets its own tab (with a status
+  dot) in the tab bar.
+- **Per-system live log** — click a system to open its own live stream:
+  source IP, destination IP, protocol, port, allow/block verdict, and
+  rule. **Green = allowed, red = blocked/dropped/rejected.**
 - **Zero dependencies** — pure Python 3 standard library, one container.
 - **One UDP port per device**, each labelled with a friendly name and
   vendor in a small JSON config.
 - **Auto-detects UniFi vs Sophos** from the log format; override per port.
-- **Green = allowed, red = blocked/dropped/rejected.**
-- **Filter** by device, vendor, source/destination IP (substring), and
+- **Filter** each system's log by source/destination IP (substring) and
   port — live or over a historical window.
 - **Retention** (default 14 days) with an optional row-count safety cap;
   old events are pruned automatically and space reclaimed.
-- **CSV export** of any filtered window.
+- **CSV export** of any filtered window, per system.
 
 > For turning captured traffic into *firewall rules* (zone-pair analysis,
 > rule candidates, port-range consolidation), see the companion project
@@ -44,8 +51,10 @@ docker run -d --name firewall-live-log --restart unless-stopped \
   ghcr.io/g-guglielmi/firewall-live-log:latest
 ```
 
-Open the dashboard at `http://<docker-host>:8080`, then point each
-firewall's syslog at this host on the port you assigned it.
+Open the dashboard at `http://<docker-host>:8080` — the Overview lists
+every configured system and turns green as logs arrive. Point each
+firewall's syslog at this host on the port you assigned it, then click a
+system to watch its live log.
 
 Pin a version for reproducible deploys:
 `ghcr.io/g-guglielmi/firewall-live-log:v0.0.1`

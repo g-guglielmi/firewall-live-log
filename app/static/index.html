@@ -10,7 +10,7 @@
   --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e;
   --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
   --border:rgba(11,11,11,0.10); --accent:#2a78d6;
-  --good:#0ca30c; --critical:#d03b3b; --serious:#ec835a;
+  --good:#0ca30c; --critical:#d03b3b; --serious:#ec835a; --warning:#fab219;
   --tint-good:rgba(12,163,12,0.07); --tint-bad:rgba(208,59,59,0.08);
 }
 @media (prefers-color-scheme: dark) {
@@ -33,26 +33,63 @@
 body { margin:0; background:var(--page); color:var(--ink);
   font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
 .wrap { max-width:1400px; margin:0 auto; padding:18px 22px 60px; }
-header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
 h1 { font-size:18px; margin:0; font-weight:650; }
+h2 { font-size:14px; font-weight:650; margin:22px 0 10px; }
 .sub { color:var(--muted); font-size:12.5px; }
 .spacer { flex:1; }
 button,.btn { font:inherit; color:var(--ink); background:var(--surface);
   border:1px solid var(--border); border-radius:8px; padding:6px 12px;
   cursor:pointer; text-decoration:none; display:inline-block; }
 button:hover,.btn:hover { border-color:var(--baseline); }
-.btn-primary { background:var(--accent); color:#fff; border-color:transparent; }
-.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-  gap:10px; margin-bottom:14px; }
-.card { background:var(--surface); border:1px solid var(--border);
-  border-radius:12px; padding:12px 14px; }
-.tile .v { font-size:23px; font-weight:650; margin-top:2px; }
+.error-banner { background:var(--tint-bad); border:1px solid var(--critical);
+  border-radius:10px; padding:8px 12px; margin-bottom:12px; display:none; }
+
+/* status dot + pill (shared) */
+.dot { width:9px; height:9px; border-radius:50%; flex:none; display:inline-block; }
+.s-receiving { background:var(--good); }
+.s-quiet     { background:var(--warning); }
+.s-stale     { background:var(--critical); }
+.s-nodata    { background:var(--muted); }
+.pill { display:inline-flex; align-items:center; gap:6px; white-space:nowrap;
+  font-size:12px; border:1px solid var(--border); border-radius:999px; padding:2px 9px; }
+
+/* tab bar */
+.tabs { display:flex; gap:4px; flex-wrap:wrap; margin:0 0 16px;
+  border-bottom:1px solid var(--grid); padding-bottom:0; }
+.tab { border:1px solid transparent; background:transparent; border-radius:8px 8px 0 0;
+  padding:7px 12px; color:var(--ink-2); font-weight:600; display:inline-flex;
+  align-items:center; gap:7px; }
+.tab:hover { color:var(--ink); }
+.tab.active { color:var(--ink); background:var(--surface);
+  border-color:var(--border); border-bottom-color:var(--surface);
+  margin-bottom:-1px; }
+
+/* overview */
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
+.tile .v { font-size:24px; font-weight:650; margin-top:2px; }
 .tile .l { color:var(--ink-2); font-size:12px; }
 .tile .s { color:var(--muted); font-size:11.5px; margin-top:2px; }
-.filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 10px; }
+.sys-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+.sys-card { background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; padding:14px 15px; cursor:pointer; transition:border-color .1s; }
+.sys-card:hover { border-color:var(--accent); }
+.sys-card.receiving { box-shadow:inset 3px 0 0 var(--good); }
+.sys-card.quiet { box-shadow:inset 3px 0 0 var(--warning); }
+.sys-card.stale, .sys-card.nodata { box-shadow:inset 3px 0 0 var(--critical); }
+.sys-card .name { font-weight:650; font-size:15px; }
+.sys-card .meta { color:var(--muted); font-size:12px; margin-top:2px; }
+.sys-card .row { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
+.sys-card .rate { font-variant-numeric:tabular-nums; }
+.sys-card .big { font-size:20px; font-weight:650; }
+
+/* system live view */
+.sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+.sysbar .title { font-size:16px; font-weight:650; }
+.filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0 10px; }
 .filters select,.filters input[type=text] { font:inherit; color:var(--ink);
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:8px; padding:5px 8px; }
+  background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:5px 8px; }
 .filters label { color:var(--ink-2); font-size:12.5px; display:flex; gap:5px; align-items:center; }
 table { border-collapse:collapse; width:100%; font-size:13px; }
 th,td { text-align:left; padding:5px 9px; border-bottom:1px solid var(--grid); vertical-align:top; }
@@ -60,18 +97,11 @@ th { color:var(--ink-2); font-weight:600; font-size:12px; white-space:nowrap;
   position:sticky; top:0; background:var(--surface); }
 td.mono,td.ip,td.port { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace; font-size:12.5px; }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
-.table-scroll { overflow-x:auto; max-height:70vh; overflow-y:auto; }
+.table-scroll { overflow-x:auto; max-height:68vh; overflow-y:auto; }
 tbody tr.ev-allow td { background:var(--tint-good); }
 tbody tr.ev-block td { background:var(--tint-bad); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
-.badge .dot { width:8px; height:8px; border-radius:50%; flex:none; }
-.vend { font-size:11px; border:1px solid var(--border); border-radius:999px;
-  padding:1px 7px; color:var(--ink-2); }
-.dev-pill { font-size:11px; border-radius:999px; padding:1px 8px;
-  background:var(--grid); color:var(--ink-2); margin-left:6px; }
-.dev-pill.on { background:var(--tint-good); color:var(--good); }
-.error-banner { background:var(--tint-bad); border:1px solid var(--critical);
-  border-radius:10px; padding:8px 12px; margin-bottom:12px; display:none; }
+.empty-note { color:var(--muted); padding:18px 4px; }
 </style>
 </head>
 <body>
@@ -80,47 +110,55 @@ tbody tr.ev-block td { background:var(--tint-bad); }
     <h1>Firewall Live Log</h1>
     <span class="sub" id="updated">loading…</span>
     <span class="spacer"></span>
-    <span class="sub" id="devPills"></span>
+    <span class="pill" id="fleetPill"><span class="dot s-nodata"></span> —</span>
   </header>
 
   <div class="error-banner" id="banner"></div>
-  <div class="tiles" id="tiles"></div>
+  <nav class="tabs" id="tabs"></nav>
 
-  <div class="filters">
-    <select id="fMode" title="Live tail, or a historical window from the retained data">
-      <option value="live">● Live</option>
-      <option value="3600">Last 1 hour</option>
-      <option value="86400">Last 24 hours</option>
-      <option value="604800">Last 7 days</option>
-    </select>
-    <select id="fDevice"><option value="">device: all</option></select>
-    <select id="fVendor">
-      <option value="">vendor: all</option>
-      <option value="unifi">UniFi</option>
-      <option value="sophos">Sophos</option>
-    </select>
-    <input type="text" id="fIp" placeholder="IP (src or dst)…" size="18">
-    <input type="text" id="fPort" placeholder="port" size="6" inputmode="numeric">
-    <select id="fAct">
-      <option value="">action: all</option>
-      <option value="Allow">allowed only</option>
-      <option value="blocked">blocked only</option>
-    </select>
-    <label><input type="checkbox" id="fPause"> pause</label>
-    <button id="fClear">Clear</button>
-    <a class="btn" id="csvLink" href="#">Download CSV</a>
-    <span class="sub" id="meta"></span>
+  <!-- Overview -->
+  <div id="page-overview">
+    <div class="tiles" id="tiles"></div>
+    <h2>Systems</h2>
+    <div class="sys-grid" id="sysGrid"></div>
   </div>
 
-  <div class="card table-scroll">
-    <table id="log">
-      <thead><tr>
-        <th>Time</th><th>Device</th><th>Vendor</th>
-        <th>Source IP</th><th>Destination IP</th>
-        <th>Proto</th><th class="num">Port</th><th>Action</th><th>Rule</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
+  <!-- Single-system live log (reused for whichever system is selected) -->
+  <div id="page-system" style="display:none">
+    <div class="sysbar">
+      <button id="backBtn">← Overview</button>
+      <span class="title" id="sysTitle"></span>
+      <span class="pill" id="sysStatus"></span>
+      <span class="sub" id="sysMeta"></span>
+    </div>
+    <div class="filters">
+      <select id="fMode" title="Live tail, or a historical window from the retained data">
+        <option value="live">● Live</option>
+        <option value="3600">Last 1 hour</option>
+        <option value="86400">Last 24 hours</option>
+        <option value="604800">Last 7 days</option>
+      </select>
+      <input type="text" id="fIp" placeholder="IP (src or dst)…" size="18">
+      <input type="text" id="fPort" placeholder="port" size="6" inputmode="numeric">
+      <select id="fAct">
+        <option value="">action: all</option>
+        <option value="Allow">allowed only</option>
+        <option value="blocked">blocked only</option>
+      </select>
+      <label><input type="checkbox" id="fPause"> pause</label>
+      <button id="fClear">Clear</button>
+      <a class="btn" id="csvLink" href="#">Download CSV</a>
+      <span class="sub" id="meta"></span>
+    </div>
+    <div class="card table-scroll">
+      <table id="log">
+        <thead><tr>
+          <th>Time</th><th>Source IP</th><th>Destination IP</th>
+          <th>Proto</th><th class="num">Port</th><th>Action</th><th>Rule</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -128,84 +166,185 @@ tbody tr.ev-block td { background:var(--tint-bad); }
 "use strict";
 const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
   Drop:"var(--critical)", Reject:"var(--serious)", "?":"var(--muted)" };
-const VENDOR_LABEL = { unifi:"UniFi", sophos:"Sophos" };
+const VENDOR_LABEL = { unifi:"UniFi", sophos:"Sophos", auto:"auto" };
 const BLOCKED = new Set(["Block","Drop","Reject"]);
 const KEEP = 3000, SHOW = 600;
+const RECV_SECS = 120, QUIET_SECS = 900;   // status thresholds
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n).toLocaleString("en-US");
 
-let events = [], cursor = 0, timer = null;
+let view = "overview";      // "overview" or a device name
+let stats = null;
+let events = [], cursor = 0, liveTimer = null;
 
+function statusOf(dev, now) {
+  if (!dev.last_seen) return { cls:"nodata", label:"no data" };
+  const age = now - dev.last_seen;
+  if (age <= RECV_SECS) return { cls:"receiving", label:"receiving" };
+  if (age <= QUIET_SECS) return { cls:"quiet", label:"quiet" };
+  return { cls:"stale", label:"stale" };
+}
+function relTime(ts, now) {
+  if (!ts) return "never";
+  const s = Math.max(0, now - ts);
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s/60) + "m ago";
+  if (s < 86400) return Math.floor(s/3600) + "h ago";
+  return Math.floor(s/86400) + "d ago";
+}
+
+/* ---------------- Tabs ---------------- */
+function renderTabs() {
+  const devs = stats ? stats.devices : [];
+  const now = stats ? stats.now : 0;
+  let h = `<button class="tab${view==="overview"?" active":""}" data-view="overview">Overview</button>`;
+  h += devs.map(d => {
+    const st = statusOf(d, now);
+    return `<button class="tab${view===d.name?" active":""}" data-view="${esc(d.name)}">
+      <span class="dot s-${st.cls}"></span>${esc(d.name)}</button>`;
+  }).join("");
+  $("tabs").innerHTML = h;
+  $("tabs").querySelectorAll(".tab").forEach(b =>
+    b.addEventListener("click", () => go(b.dataset.view)));
+}
+
+/* ---------------- Overview ---------------- */
+function renderOverview() {
+  if (!stats) return;
+  const now = stats.now, devs = stats.devices;
+  const receiving = devs.filter(d => statusOf(d, now).cls === "receiving").length;
+  const span = stats.oldest ? Math.round((stats.newest - stats.oldest)/86400*10)/10 + "d span" : "no data";
+  const tiles = [
+    ["Systems receiving", receiving + " / " + devs.length, "active in last 2 min"],
+    ["Events / min", fmt(stats.events_last_min), "across the fleet"],
+    ["Events received", fmt(stats.parsed), span],
+    ["Retention", stats.retention_days + " days", stats.max_events ? "cap " + fmt(stats.max_events) : "time-based"],
+    ["Dropped", fmt(stats.dropped), "queue overflow"],
+    ["Unparsed", fmt(stats.unparsed), "kept for diagnosis"],
+  ];
+  $("tiles").innerHTML = tiles.map(([l,v,s]) =>
+    `<div class="card tile"><div class="l">${esc(l)}</div>
+     <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
+  $("sysGrid").innerHTML = devs.map(d => {
+    const st = statusOf(d, now);
+    return `<div class="sys-card ${st.cls}" data-view="${esc(d.name)}">
+      <div class="name">${esc(d.name)}</div>
+      <div class="meta">${esc(VENDOR_LABEL[d.vendor]||d.vendor)} · udp/${d.port}</div>
+      <div class="row">
+        <span class="pill"><span class="dot s-${st.cls}"></span>${st.label}</span>
+        <span class="sub">${relTime(d.last_seen, now)}</span>
+      </div>
+      <div class="row">
+        <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span></span>
+        <span class="sub">${fmt(d.events)} total</span>
+      </div>
+    </div>`;
+  }).join("");
+  $("sysGrid").querySelectorAll(".sys-card").forEach(c =>
+    c.addEventListener("click", () => go(c.dataset.view)));
+}
+
+function renderFleetPill() {
+  if (!stats) return;
+  const now = stats.now, devs = stats.devices;
+  const receiving = devs.filter(d => statusOf(d, now).cls === "receiving").length;
+  const cls = receiving === devs.length ? "s-receiving"
+            : receiving === 0 ? "s-stale" : "s-quiet";
+  $("fleetPill").innerHTML = `<span class="dot ${cls}"></span> ${receiving}/${devs.length} receiving`;
+}
+
+/* ---------------- System live log ---------------- */
+function deviceByName(name) {
+  return (stats ? stats.devices : []).find(d => d.name === name);
+}
 function currentFilters() {
-  return { device:$("fDevice").value, vendor:$("fVendor").value,
-           ip:$("fIp").value.trim(), port:$("fPort").value.trim(),
-           action:$("fAct").value };
+  return { ip:$("fIp").value.trim(), port:$("fPort").value.trim(), action:$("fAct").value };
 }
 function filterQuery() {
   const f = currentFilters(), p = new URLSearchParams();
+  p.set("device", view);
   for (const k in f) if (f[k]) p.set(k, f[k]);
   return p;
 }
-
 function rowHtml(e) {
   const cls = e.action === "Allow" ? "ev-allow" : BLOCKED.has(e.action) ? "ev-block" : "";
   return `<tr class="${cls}">
     <td class="mono">${new Date(e.ts*1000).toLocaleTimeString()}</td>
-    <td>${esc(e.device)}</td>
-    <td><span class="vend">${esc(VENDOR_LABEL[e.vendor] || e.vendor)}</span></td>
     <td class="ip">${esc(e.src)}</td><td class="ip">${esc(e.dst)}</td>
     <td>${esc(e.proto)}</td>
     <td class="num port">${e.dst_port >= 0 ? e.dst_port : "—"}</td>
     <td><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
     <td>${esc(e.rule)}</td></tr>`;
 }
-function render() {
+function renderLog() {
   const shown = events.slice(-SHOW).reverse();
   $("meta").textContent = `${shown.length} shown / ${events.length} loaded`;
-  $("log").querySelector("tbody").innerHTML = shown.map(rowHtml).join("");
+  const body = $("log").querySelector("tbody");
+  body.innerHTML = shown.length ? shown.map(rowHtml).join("")
+    : `<tr><td colspan="7" class="empty-note">No matching events yet.</td></tr>`;
 }
-
 async function pollLive() {
-  if ($("fMode").value !== "live" || $("fPause").checked) return;
+  if (view === "overview" || $("fMode").value !== "live" || $("fPause").checked) return;
   try {
     const p = filterQuery(); p.set("since", cursor);
     const res = await (await fetch("/api/live?" + p)).json();
     if (res.error) throw new Error(res.error);
-    if (res.cursor < cursor) { events = []; }   // db pruned/restarted
+    if (res.cursor < cursor) events = [];   // db pruned / restarted
     cursor = res.cursor;
     if (res.events.length) {
       events.push(...res.events);
       if (events.length > KEEP) events = events.slice(-KEEP);
-      render();
+      renderLog();
     }
-    $("updated").textContent = "live · " + new Date().toLocaleTimeString();
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
 }
-
 async function loadWindow() {
   try {
     const p = filterQuery(); p.set("window", $("fMode").value); p.set("limit", "2000");
     const res = await (await fetch("/api/events?" + p)).json();
     if (res.error) throw new Error(res.error);
-    events = res.events.slice().reverse();  // oldest-first internally
-    render();
-    $("updated").textContent = "snapshot · " + new Date().toLocaleTimeString();
+    events = res.events.slice().reverse();
+    renderLog();
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
 }
-
-function refetch() {
+function refetchSystem() {
   events = []; cursor = 0;
-  $("csvLink").href = "/api/events.csv?" + (function(){
-    const p = filterQuery();
-    p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
-    return p;
-  })();
+  const p = filterQuery();
+  p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
+  $("csvLink").href = "/api/events.csv?" + p;
   if ($("fMode").value === "live") pollLive(); else loadWindow();
+}
+
+/* ---------------- Navigation ---------------- */
+function go(target) {
+  view = target;
+  const isSys = target !== "overview";
+  $("page-overview").style.display = isSys ? "none" : "";
+  $("page-system").style.display = isSys ? "" : "none";
+  renderTabs();
+  if (isSys) {
+    const d = deviceByName(target);
+    $("sysTitle").textContent = target;
+    $("sysMeta").textContent = d ? `${VENDOR_LABEL[d.vendor]||d.vendor} · udp/${d.port}` : "";
+    updateSysStatus();
+    ["fIp","fPort"].forEach(id => $(id).value = "");
+    $("fAct").value = ""; $("fMode").value = "live"; $("fPause").checked = false;
+    refetchSystem();
+  } else {
+    renderOverview();
+  }
+}
+function updateSysStatus() {
+  if (view === "overview" || !stats) return;
+  const d = deviceByName(view);
+  if (!d) return;
+  const st = statusOf(d, stats.now);
+  $("sysStatus").innerHTML = `<span class="dot s-${st.cls}"></span>${st.label}`;
 }
 
 function showError(e) {
@@ -216,44 +355,32 @@ function showError(e) {
 async function loadStats() {
   try {
     const s = await (await fetch("/api/stats")).json();
-    const win = s.oldest ? Math.round((s.newest - s.oldest)/86400*10)/10 + "d span" : "no data";
-    $("tiles").innerHTML = [
-      ["Events / min", fmt(s.events_last_min), "current rate"],
-      ["Retained events", fmt(s.total), win],
-      ["Retention", s.retention_days + " days", s.max_events ? "cap " + fmt(s.max_events) : "time-based"],
-      ["Devices", s.devices.filter(d=>d.active).length + " / " + s.devices.length, "active / total"],
-      ["Dropped", fmt(s.dropped), "queue overflow"],
-      ["Unparsed", fmt(s.unparsed), "kept for diagnosis"],
-    ].map(([l,v,sub]) => `<div class="card tile"><div class="l">${esc(l)}</div>
-      <div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
-    // device dropdown + activity pills
-    const cur = $("fDevice").value;
-    $("fDevice").innerHTML = '<option value="">device: all</option>' +
-      s.devices.map(d => `<option${d.name===cur?" selected":""}>${esc(d.name)}</option>`).join("");
-    $("devPills").innerHTML = s.devices.map(d =>
-      `<span class="dev-pill${d.active?" on":""}" title="${esc(d.vendor)} · ${fmt(d.events)} events">${esc(d.name)}</span>`).join(" ");
-  } catch (e) { /* stats are best-effort; live poll surfaces hard errors */ }
+    stats = s;
+    renderTabs(); renderFleetPill();
+    if (view === "overview") renderOverview(); else updateSysStatus();
+    $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+    $("banner").style.display = "none";
+  } catch (e) { showError(e); }
 }
 
+/* filter + mode listeners (system view) */
 $("fMode").addEventListener("change", () => {
-  clearInterval(timer); timer = null;
-  refetch();
-  if ($("fMode").value === "live") timer = setInterval(pollLive, 2000);
+  clearInterval(liveTimer); liveTimer = null;
+  refetchSystem();
+  if ($("fMode").value === "live") liveTimer = setInterval(pollLive, 2000);
 });
-["fDevice","fVendor","fAct"].forEach(id => $(id).addEventListener("change", refetch));
-["fIp","fPort"].forEach(id => $(id).addEventListener("input", debounce(refetch, 350)));
+["fIp","fPort"].forEach(id => $(id).addEventListener("input", debounce(refetchSystem, 350)));
+$("fAct").addEventListener("change", refetchSystem);
 $("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLive(); });
 $("fClear").addEventListener("click", () => {
-  ["fDevice","fVendor","fAct"].forEach(id => $(id).value = "");
-  $("fIp").value = ""; $("fPort").value = ""; refetch();
+  ["fIp","fPort"].forEach(id => $(id).value = ""); $("fAct").value = ""; refetchSystem();
 });
-
+$("backBtn").addEventListener("click", () => go("overview"));
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 
-refetch();
-timer = setInterval(pollLive, 2000);
 loadStats();
 setInterval(loadStats, 5000);
+liveTimer = setInterval(pollLive, 2000);
 </script>
 </body>
 </html>

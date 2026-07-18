@@ -207,12 +207,21 @@ def main():
     check("no new events after cursor",
           tail["events"] == [] and tail["cursor"] == live["cursor"], str(tail))
 
-    print("== stats + csv + unparsed ==")
+    print("== stats + per-device health + csv + unparsed ==")
     st = get_json("/api/stats")
-    check("stats total = 58", st["total"] == 58, str(st["total"]))
+    check("stats parsed = 58 (lifetime)", st["parsed"] == 58, str(st["parsed"]))
     check("stats unparsed = 1", st["unparsed"] == 1, str(st["unparsed"]))
-    check("stats devices active", sum(1 for d in st["devices"]
-          if d["active"]) == 3)
+    dmap = {d["name"]: d for d in st["devices"]}
+    check("per-device totals from meta (scan-free)",
+          dmap["UDM-Test"]["events"] == 31
+          and dmap["Sophos-Test"]["events"] == 25
+          and dmap["Mixed-Auto"]["events"] == 2,
+          str({k: v["events"] for k, v in dmap.items()}))
+    check("per-device last_seen populated",
+          all(dmap[n]["last_seen"] for n in dmap), str(dmap))
+    check("all 3 devices seen this minute",
+          sum(1 for d in st["devices"] if d["events_last_min"] > 0) == 3,
+          str({k: v["events_last_min"] for k, v in dmap.items()}))
     with urllib.request.urlopen(BASE + "/api/events.csv?window=86400",
                                 timeout=10) as r:
         csv_text = r.read().decode()
