@@ -35,6 +35,20 @@ retention so you also get short-term history and CSV export.
 > This project is the always-on live view; that one is the batch
 > rule-mining tool.
 
+## Screenshots
+
+**Overview** — fleet health at a glance: every system with its status,
+current rate, and last-seen; one tab per system.
+
+![Overview dashboard showing six firewalls with receiving/no-data status cards](docs/overview.svg)
+
+**Per-system live log** — click a system for its own colour-coded stream
+(green = allowed, red = blocked), filterable by IP, port, and action.
+
+![Per-system live log with green allowed and red blocked rows](docs/system-live.svg)
+
+<sub>Previews rendered with sample data.</sub>
+
 ## Quick start
 
 ```sh
