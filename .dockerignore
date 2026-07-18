@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+README.md
+__pycache__
+*.db
+*.db-wal
+*.db-shm
+data
+devices.json

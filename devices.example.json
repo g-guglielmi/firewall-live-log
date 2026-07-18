@@ -1,0 +1,11 @@
+{
+  "retention_days": 14,
+  "max_events": 0,
+  "devices": [
+    { "name": "UDM-HQ",          "port": 5514, "vendor": "unifi" },
+    { "name": "UDM-Warehouse",   "port": 5515, "vendor": "unifi" },
+    { "name": "Sophos-HQ",       "port": 5516, "vendor": "sophos" },
+    { "name": "Sophos-Branch-1", "port": 5517, "vendor": "sophos" },
+    { "name": "Unknown-Device",  "port": 5518, "vendor": "auto" }
+  ]
+}
