@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="96" height="96" alt="firewall-live-log icon"></p>
+
 # firewall-live-log
 
 A permanent, multi-device **live firewall log dashboard**. Each firewall
@@ -73,6 +75,15 @@ system to watch its live log.
 Pin a version for reproducible deploys:
 `ghcr.io/g-guglielmi/firewall-live-log:v0.0.1`
 (all versions under [Packages](https://github.com/g-guglielmi/firewall-live-log/pkgs/container/firewall-live-log)).
+
+**Unraid / Portainer / other Docker UIs**: when adding the container
+manually, paste this into the "Icon URL" field:
+
+```
+https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/docs/icon.png
+```
+
+(An SVG version is also at `docs/icon.svg` if your UI prefers vector icons.)
 
 ### Without host networking
 
