@@ -108,6 +108,36 @@ Note: Docker's UDP port-forwarding can rewrite the packet source IP in
 some configurations. Since the source IP is exactly what a firewall log
 is about, `--network host` is the safer choice for this collector.
 
+### Unraid template
+
+A ready-made Docker template is in
+[`unraid/firewall-live-log.xml`](unraid/firewall-live-log.xml). To
+install it:
+
+```sh
+# From the Unraid terminal:
+mkdir -p /boot/config/plugins/dockerMan/templates-user
+curl -fL -o /boot/config/plugins/dockerMan/templates-user/my-firewall-live-log.xml \
+  https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/unraid/firewall-live-log.xml
+```
+
+Then go to **Docker → Add Container** and pick *firewall-live-log* from
+the **Template** dropdown. Before the first start, put a `devices.json`
+in the data folder (copy [`devices.example.json`](devices.example.json))
+and make the folder writable by the container user:
+
+```sh
+chown -R 10001:10001 /mnt/user/appdata/firewall-live-log
+```
+
+If you run the container on a custom network (`br0` / a VLAN bridge)
+instead of `bridge`, the port mappings are ignored — the container gets
+its own IP and every port is reachable on it directly. Remember that
+Unraid blocks host ↔ container traffic on macvlan networks unless
+**Settings → Docker → Host access to custom networks** is enabled, and
+that clients (and your firewalls' syslog senders) on other subnets need
+a route and firewall permission to reach that VLAN.
+
 ## Device configuration (`devices.json`)
 
 ```json

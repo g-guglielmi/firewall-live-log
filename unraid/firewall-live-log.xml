@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>firewall-live-log</Name>
+  <Repository>ghcr.io/g-guglielmi/firewall-live-log:latest</Repository>
+  <Registry>https://github.com/g-guglielmi/firewall-live-log/pkgs/container/firewall-live-log</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/g-guglielmi/firewall-live-log/issues</Support>
+  <Project>https://github.com/g-guglielmi/firewall-live-log</Project>
+  <Overview>A permanent, multi-device live firewall log dashboard. Each firewall or gateway ships its syslog to its own UDP port; the dashboard shows a real-time, colour-coded stream of every connection - source IP, destination IP, protocol, port, and the allow/block verdict - across the whole fleet at once, filterable by device, vendor, IP, and port.&#10;&#10;Supports UniFi (UDM / UniFi OS) and Sophos Firewall (SFOS v18-v22) simultaneously, with automatic per-port vendor detection. Events are kept in SQLite with time-based retention, short-term history, and CSV export. Zero dependencies - pure Python standard library, one container.&#10;&#10;SETUP: before the first start, copy devices.example.json from the GitHub repo into the data folder as devices.json and list your devices (one UDP port each). The container runs as UID 10001, so the data folder must be writable by it: chown -R 10001:10001 /mnt/user/appdata/firewall-live-log (or chmod -R 777). Make sure the Syslog Ports mapping below covers every port used in devices.json, then point each firewall's syslog at this host on its assigned port.</Overview>
+  <Category>Network:Other Security: Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/unraid/firewall-live-log.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/docs/icon.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>A devices.json in the data folder (copy devices.example.json from the repo) and a data folder writable by UID 10001.</Requires>
+  <Config Name="WebUI Port" Target="8080" Default="8080" Mode="tcp" Description="Dashboard HTTP port. If you change the host side only, leave HTTP_PORT alone; the container side stays 8080." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Syslog Ports (UDP)" Target="5514-5518" Default="5514-5518" Mode="udp" Description="One UDP port per device. Must cover every port listed in devices.json - widen the range (or add more port mappings) when you add devices." Type="Port" Display="always" Required="true" Mask="false">5514-5518</Config>
+  <Config Name="Data Folder" Target="/data" Default="/mnt/user/appdata/firewall-live-log/" Mode="rw" Description="Holds devices.json (your device/port config) and events.db (the SQLite event store). Must be writable by UID 10001." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/firewall-live-log/</Config>
+  <Config Name="Retention (days)" Target="RETENTION_DAYS" Default="14" Mode="" Description="Events older than this are pruned automatically." Type="Variable" Display="always" Required="false" Mask="false">14</Config>
+  <Config Name="Max events (row cap)" Target="MAX_EVENTS" Default="0" Mode="" Description="Optional safety cap on total stored events. 0 = disabled (time-based retention only)." Type="Variable" Display="always" Required="false" Mask="false">0</Config>
+  <Config Name="Devices config path" Target="DEVICES_CONFIG" Default="/data/devices.json" Mode="" Description="Path of devices.json inside the container. Leave at the default unless you move it." Type="Variable" Display="advanced" Required="false" Mask="false">/data/devices.json</Config>
+  <Config Name="Database path" Target="DB_PATH" Default="/data/events.db" Mode="" Description="Path of the SQLite database inside the container. Leave at the default." Type="Variable" Display="advanced" Required="false" Mask="false">/data/events.db</Config>
+  <Config Name="HTTP bind address" Target="HTTP_BIND" Default="0.0.0.0" Mode="" Description="Address the dashboard listens on inside the container. Leave at 0.0.0.0." Type="Variable" Display="advanced" Required="false" Mask="false">0.0.0.0</Config>
+  <Config Name="Prune interval (sec)" Target="PRUNE_INTERVAL_SEC" Default="3600" Mode="" Description="How often the retention sweep runs." Type="Variable" Display="advanced" Required="false" Mask="false">3600</Config>
+  <Config Name="Queue max" Target="QUEUE_MAX" Default="100000" Mode="" Description="Max in-flight events buffered before new packets are dropped (burst protection)." Type="Variable" Display="advanced" Required="false" Mask="false">100000</Config>
+</Container>
