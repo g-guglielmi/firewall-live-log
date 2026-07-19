@@ -98,8 +98,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        for k, v in (headers or {}).items():
+        headers = headers or {}
+        if "Cache-Control" not in headers:
+            self.send_header("Cache-Control", "no-store")
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
@@ -114,6 +116,15 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 with open(os.path.join(_STATIC_DIR, "index.html"), "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
+                return
+            if path in ("/favicon.ico", "/favicon.png"):
+                # PNG served on both paths: browsers that ignore the page's
+                # <link rel=icon> fall back to requesting /favicon.ico, and
+                # Chromium accepts PNG bytes there as long as the
+                # Content-Type says so.  Cacheable, unlike the API.
+                with open(os.path.join(_STATIC_DIR, "favicon.png"), "rb") as f:
+                    self._send(200, f.read(), "image/png",
+                               {"Cache-Control": "public, max-age=86400"})
                 return
             if path == "/api/stats":
                 self._json(_stats(self.state))

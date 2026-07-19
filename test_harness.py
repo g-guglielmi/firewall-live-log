@@ -252,6 +252,14 @@ def main():
     check("csv export", "attachment" in disp
           and csv_text.startswith("time,device,vendor,")
           and "Drop-RDP" in csv_text, disp)
+    for fav in ("/favicon.ico", "/favicon.png"):
+        with urllib.request.urlopen(BASE + fav, timeout=10) as r:
+            body = r.read()
+            check(f"favicon at {fav}",
+                  r.headers.get("Content-Type") == "image/png"
+                  and body.startswith(b"\x89PNG")
+                  and "max-age" in r.headers.get("Cache-Control", ""),
+                  str(r.headers.get("Content-Type")))
 
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
