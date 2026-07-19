@@ -202,6 +202,20 @@ def main():
     f = get_json("/api/live?since=0&port=3389")
     check("port filter", all(e["dst_port"] == 3389 for e in f["events"])
           and len(f["events"]) == 6, str(len(f["events"])))
+    f = get_json("/api/live?since=0&port=44")
+    check("port prefix filter",
+          all(str(e["dst_port"]).startswith("44") for e in f["events"])
+          and len(f["events"]) == 43, str(len(f["events"])))
+    f = get_json("/api/live?since=0&port=%3D443")   # "=443" -> exact
+    check("port exact filter (=)",
+          all(e["dst_port"] == 443 for e in f["events"])
+          and len(f["events"]) == 35, str(len(f["events"])))
+    try:
+        urllib.request.urlopen(BASE + "/api/live?since=0&port=44x", timeout=10)
+        code = 200
+    except urllib.error.HTTPError as e:
+        code = e.code
+    check("non-numeric port filter -> 400", code == 400, str(code))
     f = get_json("/api/live?since=0&ip=192.168.10.55")
     check("ip filter (src/dst substring)",
           all("192.168.10.55" in (e["src"], e["dst"]) for e in f["events"])

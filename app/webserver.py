@@ -44,8 +44,10 @@ def _filters_from(params):
         v = params.get(key, [""])[0].strip()
         return v or None
     port = one("port")
-    if port is not None and not port.isdigit():
-        raise ValueError("port filter must be numeric")
+    if port is not None and not (port[1:] if port.startswith("=")
+                                 else port).isdigit():
+        raise ValueError("port filter must be numeric "
+                         "(optionally prefixed with = for exact match)")
     return {"device": one("device"), "vendor": one("vendor"),
             "ip": one("ip"), "port": port, "action": one("action")}
 

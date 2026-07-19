@@ -147,7 +147,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         <option value="604800">Last 7 days</option>
       </select>
       <input type="text" id="fIp" placeholder="IP (src or dst)…" size="18">
-      <input type="text" id="fPort" placeholder="port" size="6" inputmode="numeric">
+      <input type="text" id="fPort" placeholder="port" size="6"
+        title="Matches as you type: 44 finds 443 and 445. Use =80 for exactly port 80.">
       <select id="fAct">
         <option value="">action: all</option>
         <option value="Allow">allowed only</option>

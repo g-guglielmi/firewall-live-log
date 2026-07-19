@@ -212,6 +212,9 @@ shows lines that didn't match a parser.
 
 `action` filter accepts `Allow`, `blocked` (Block/Drop/Reject), or `NAT`
 (DNAT/SNAT/masquerade/port-forward translation records).
+`ip` matches as a substring of source or destination; `port` matches as
+a prefix (`44` finds 443 and 445) — prefix it with `=` for an exact
+match (`=80` excludes 8080).
 
 ## Testing
 

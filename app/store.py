@@ -116,8 +116,16 @@ def _filter_clauses(f):
         like = f"%{f['ip']}%"
         args += [like, like]
     if f.get("port"):
-        clauses.append("dst_port = ?")
-        args.append(int(f["port"]))
+        # Prefix match so the result narrows as the user types ("44"
+        # matches 443 and 445), mirroring the substring IP filter.  A
+        # leading "=" forces an exact match ("=80" excludes 8080).
+        port = str(f["port"])
+        if port.startswith("="):
+            clauses.append("dst_port = ?")
+            args.append(int(port[1:]))
+        else:
+            clauses.append("CAST(dst_port AS TEXT) LIKE ?")
+            args.append(port + "%")
     action = f.get("action")
     if action == "blocked":
         clauses.append("action IN (?,?,?)")
