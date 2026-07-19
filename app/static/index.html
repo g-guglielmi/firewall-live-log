@@ -189,6 +189,10 @@ const fmt = n => Number(n).toLocaleString("en-US");
 let view = "overview";      // "overview" or a device name
 let stats = null;
 let events = [], cursor = 0, liveTimer = null;
+// Bumped on every view/filter change; in-flight fetches capture it and
+// discard their response if it changed, so a slow reply for the previous
+// device can never paint rows into the newly selected one.
+let fetchGen = 0;
 
 function statusOf(dev, now) {
   if (!dev.last_seen) return { cls:"nodata", label:"no data" };
@@ -299,9 +303,11 @@ function renderLog() {
 }
 async function pollLive() {
   if (view === "overview" || $("fMode").value !== "live" || $("fPause").checked) return;
+  const gen = fetchGen;
   try {
     const p = filterQuery(); p.set("since", cursor);
     const res = await (await fetch("/api/live?" + p)).json();
+    if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     if (res.cursor < cursor) events = [];   // db pruned / restarted
     cursor = res.cursor;
@@ -314,9 +320,11 @@ async function pollLive() {
   } catch (e) { showError(e); }
 }
 async function loadWindow() {
+  const gen = fetchGen;
   try {
     const p = filterQuery(); p.set("window", $("fMode").value); p.set("limit", "2000");
     const res = await (await fetch("/api/events?" + p)).json();
+    if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     events = res.events.slice().reverse();
     renderLog();
@@ -324,7 +332,9 @@ async function loadWindow() {
   } catch (e) { showError(e); }
 }
 function refetchSystem() {
+  fetchGen++;
   events = []; cursor = 0;
+  renderLog();   // clear the table now — an empty device gets no later render
   const p = filterQuery();
   p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
   $("csvLink").href = "/api/events.csv?" + p;
