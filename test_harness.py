@@ -136,6 +136,10 @@ def main():
     for _ in range(3):
         send(unifi_line("LAN_IN-A-2005", "Allow ping",
                         "10.0.10.5", "10.0.20.5", "ICMP"), P_UNIFI)
+    # DNAT / port-forward: no filter verdict in the tag -> classified NAT.
+    for _ in range(5):
+        send(unifi_line("WAN_LOCAL", "PortForward DNAT [qBittorrent]",
+                        "203.0.113.7", "10.0.10.9", "UDP", 49908), P_UNIFI)
     for _ in range(15):
         send(sophos_line("Allowed", "LAN-to-WAN",
                          "192.168.10.20", "8.8.8.8", "TCP", 443), P_SOPHOS)
@@ -158,8 +162,8 @@ def main():
     print("== live api ==")
     live = get_json("/api/live?since=0&limit=2000")
     evs = live["events"]
-    # 31 UDM-Test + 25 Sophos-Test + 2 Mixed-Auto (1 unifi + 1 sophos) = 58.
-    check("events stored and returned", len(evs) == 58, str(len(evs)))
+    # 36 UDM-Test + 25 Sophos-Test + 2 Mixed-Auto (1 unifi + 1 sophos) = 63.
+    check("events stored and returned", len(evs) == 63, str(len(evs)))
     by = lambda **kw: [e for e in evs if all(e[k] == v for k, v in kw.items())]
 
     check("unifi allow parsed",
@@ -168,6 +172,8 @@ def main():
           len(by(device="UDM-Test", action="Drop", dst_port=445)) == 8)
     check("unifi ICMP -> port -1",
           len(by(device="UDM-Test", proto="ICMP", dst_port=-1)) == 3)
+    check("unifi DNAT/port-forward -> NAT",
+          len(by(device="UDM-Test", action="NAT", dst_port=49908)) == 5)
     check("sophos Allowed -> Allow",
           len(by(device="Sophos-Test", action="Allow", dst_port=443)) == 15)
     check("sophos Denied -> Block",
@@ -190,6 +196,9 @@ def main():
     f = get_json("/api/live?since=0&action=blocked")
     check("blocked filter", all(e["action"] in ("Block", "Drop", "Reject")
           for e in f["events"]) and len(f["events"]) == 18, str(len(f["events"])))
+    f = get_json("/api/live?since=0&action=NAT")
+    check("nat filter", all(e["action"] == "NAT" for e in f["events"])
+          and len(f["events"]) == 5, str(len(f["events"])))
     f = get_json("/api/live?since=0&port=3389")
     check("port filter", all(e["dst_port"] == 3389 for e in f["events"])
           and len(f["events"]) == 6, str(len(f["events"])))
@@ -200,7 +209,7 @@ def main():
     f = get_json("/api/live?since=0&device=UDM-Test")
     check("device filter",
           all(e["device"] == "UDM-Test" for e in f["events"])
-          and len(f["events"]) == 31, str(len(f["events"])))
+          and len(f["events"]) == 36, str(len(f["events"])))
 
     print("== incremental cursor ==")
     tail = get_json(f"/api/live?since={live['cursor']}")
@@ -209,11 +218,11 @@ def main():
 
     print("== stats + per-device health + csv + unparsed ==")
     st = get_json("/api/stats")
-    check("stats parsed = 58 (lifetime)", st["parsed"] == 58, str(st["parsed"]))
+    check("stats parsed = 63 (lifetime)", st["parsed"] == 63, str(st["parsed"]))
     check("stats unparsed = 1", st["unparsed"] == 1, str(st["unparsed"]))
     dmap = {d["name"]: d for d in st["devices"]}
     check("per-device totals from meta (scan-free)",
-          dmap["UDM-Test"]["events"] == 31
+          dmap["UDM-Test"]["events"] == 36
           and dmap["Sophos-Test"]["events"] == 25
           and dmap["Mixed-Auto"]["events"] == 2,
           str({k: v["events"] for k, v in dmap.items()}))

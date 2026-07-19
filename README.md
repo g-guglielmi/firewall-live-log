@@ -20,7 +20,8 @@ retention so you also get short-term history and CSV export.
   dot) in the tab bar.
 - **Per-system live log** — click a system to open its own live stream:
   source IP, destination IP, protocol, port, allow/block verdict, and
-  rule. **Green = allowed, red = blocked/dropped/rejected.**
+  rule. **Green = allowed, red = blocked/dropped/rejected, blue =
+  NAT/port-forward** (a translation record, not a permit/deny verdict).
 - **Zero dependencies** — pure Python 3 standard library, one container.
 - **One UDP port per device**, each labelled with a friendly name and
   vendor in a small JSON config.
@@ -209,7 +210,8 @@ shows lines that didn't match a parser.
 | `GET /api/stats` | Totals, rate, per-device activity, retention. |
 | `GET /api/devices` | Configured devices. |
 
-`action` filter accepts `Allow` or `blocked` (Block/Drop/Reject).
+`action` filter accepts `Allow`, `blocked` (Block/Drop/Reject), or `NAT`
+(DNAT/SNAT/masquerade/port-forward translation records).
 
 ## Testing
 

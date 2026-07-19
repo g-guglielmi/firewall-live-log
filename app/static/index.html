@@ -12,7 +12,9 @@
   --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
   --border:rgba(11,11,11,0.10); --accent:#2a78d6;
   --good:#0ca30c; --critical:#d03b3b; --serious:#ec835a; --warning:#fab219;
+  --nat:#2a78d6;
   --tint-good:rgba(12,163,12,0.07); --tint-bad:rgba(208,59,59,0.08);
+  --tint-nat:rgba(42,120,214,0.09);
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -20,7 +22,9 @@
     --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7;
     --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
     --border:rgba(255,255,255,0.10); --accent:#3987e5;
+    --nat:#4b93ea;
     --tint-good:rgba(12,163,12,0.13); --tint-bad:rgba(230,103,103,0.15);
+    --tint-nat:rgba(58,135,229,0.16);
   }
 }
 :root[data-theme="dark"] {
@@ -28,7 +32,9 @@
   --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7;
   --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
   --border:rgba(255,255,255,0.10); --accent:#3987e5;
+  --nat:#4b93ea;
   --tint-good:rgba(12,163,12,0.13); --tint-bad:rgba(230,103,103,0.15);
+  --tint-nat:rgba(58,135,229,0.16);
 }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--page); color:var(--ink);
@@ -101,6 +107,7 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .table-scroll { overflow-x:auto; max-height:68vh; overflow-y:auto; }
 tbody tr.ev-allow td { background:var(--tint-good); }
 tbody tr.ev-block td { background:var(--tint-bad); }
+tbody tr.ev-nat td { background:var(--tint-nat); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .empty-note { color:var(--muted); padding:18px 4px; }
 </style>
@@ -145,6 +152,7 @@ tbody tr.ev-block td { background:var(--tint-bad); }
         <option value="">action: all</option>
         <option value="Allow">allowed only</option>
         <option value="blocked">blocked only</option>
+        <option value="NAT">NAT / forward only</option>
       </select>
       <label><input type="checkbox" id="fPause"> pause</label>
       <button id="fClear">Clear</button>
@@ -166,7 +174,8 @@ tbody tr.ev-block td { background:var(--tint-bad); }
 <script>
 "use strict";
 const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
-  Drop:"var(--critical)", Reject:"var(--serious)", "?":"var(--muted)" };
+  Drop:"var(--critical)", Reject:"var(--serious)", NAT:"var(--nat)",
+  "?":"var(--muted)" };
 const VENDOR_LABEL = { unifi:"UniFi", sophos:"Sophos", auto:"auto" };
 const BLOCKED = new Set(["Block","Drop","Reject"]);
 const KEEP = 3000, SHOW = 600;
@@ -271,7 +280,8 @@ function filterQuery() {
   return p;
 }
 function rowHtml(e) {
-  const cls = e.action === "Allow" ? "ev-allow" : BLOCKED.has(e.action) ? "ev-block" : "";
+  const cls = e.action === "Allow" ? "ev-allow" : BLOCKED.has(e.action) ? "ev-block"
+    : e.action === "NAT" ? "ev-nat" : "";
   return `<tr class="${cls}">
     <td class="mono">${new Date(e.ts*1000).toLocaleTimeString()}</td>
     <td class="ip">${esc(e.src)}</td><td class="ip">${esc(e.dst)}</td>

@@ -38,7 +38,7 @@ def open_writer(path):
             dst      TEXT    NOT NULL,
             proto    TEXT    NOT NULL,
             dst_port INTEGER NOT NULL,   -- -1 sentinel for ICMP / no port
-            action   TEXT    NOT NULL,   -- Allow / Block / Drop / Reject / ?
+            action   TEXT    NOT NULL,   -- Allow / Block / Drop / Reject / NAT / ?
             rule     TEXT    NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);

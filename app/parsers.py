@@ -5,7 +5,10 @@ A normalized event is the tuple:
     (vendor, src_ip, dst_ip, proto, dst_port, action, rule)
 
 with sentinels  dst_port = -1  (ICMP / no port) and  rule = ""  (absent),
-and action in {Allow, Block, Drop, Reject, ?}.
+and action in {Allow, Block, Drop, Reject, NAT, ?}.  NAT marks a
+translation record (DNAT/SNAT/masquerade/port-forward) — a NAT log line
+describes address translation, not a permit/deny verdict, so it is kept
+as its own category rather than coerced into Allow or Block.
 
 Two vendors are supported today:
 
@@ -50,6 +53,10 @@ _U_ACTION_MARKER = {"A": "Allow", "B": "Block", "D": "Drop", "R": "Reject",
                     "Drop": "Drop", "Reject": "Reject"}
 _U_KEYWORDS = [("allow", "Allow"), ("accept", "Allow"), ("reject", "Reject"),
                ("drop", "Drop"), ("block", "Block"), ("deny", "Block")]
+# NAT/forward markers: a DNAT/SNAT/masquerade/port-forward line is a
+# translation record, not a filter verdict.  Matched as whole words so
+# "nat" can't fire on substrings like "donate".
+_U_NAT = re.compile(r"\b(?:d?nat|snat|masquerade|port[\s_-]?forward)\b", re.I)
 
 
 def parse_unifi(line):
@@ -74,11 +81,17 @@ def parse_unifi(line):
             action = _U_ACTION_MARKER[am.group(1)]
             break
     if action == "?":
-        low = rule.lower()
-        for kw, act in _U_KEYWORDS:
-            if kw in low:
-                action = act
-                break
+        # A real filter verdict in the rule tag wins above; here there is
+        # none, so a NAT/forward rule is classified as NAT before the fuzzy
+        # allow/block keyword fallback gets a chance to mislabel it.
+        if _U_NAT.search(rule):
+            action = "NAT"
+        else:
+            low = rule.lower()
+            for kw, act in _U_KEYWORDS:
+                if kw in low:
+                    action = act
+                    break
     return (src, dst, proto, dst_port, action, rule)
 
 
