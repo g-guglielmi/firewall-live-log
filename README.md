@@ -80,10 +80,16 @@ Pin a version for reproducible deploys:
 manually, paste this into the "Icon URL" field:
 
 ```
-https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/docs/icon.png
+https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/docs/icon.png?v=2
 ```
 
 (An SVG version is also at `docs/icon.svg` if your UI prefers vector icons.)
+
+> **Icon not updating after a change?** Unraid downloads the icon once and
+> caches it, so it keeps showing the old one even after the file changes at
+> the same URL. Bump the `?v=` number (e.g. `?v=3`) so Unraid sees a new URL
+> and re-fetches. In a browser, hard-refresh (Ctrl+Shift+R) to clear the
+> cached image.
 
 ### Without host networking
 
