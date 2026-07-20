@@ -197,6 +197,8 @@ Editing `devices.json` takes effect on container restart.
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
 | `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie (otherwise auto-set when `X-Forwarded-Proto: https` is seen). |
+| `SESSION_TTL_HOURS` | `12` | Absolute maximum session lifetime (hours). |
+| `SESSION_IDLE_MINUTES` | `0` | Idle timeout in minutes (`0` = disabled); expires a session this long after the last user activity, capped by `SESSION_TTL_HOURS`. |
 | `PUBLIC_URL` | _(none)_ | Public base URL of the dashboard (e.g. `https://firewall.example.com`); used to build password-reset links. A bare hostname is assumed `https://`. Required for self-service reset emails. |
 | `SMTP_HOST` | _(none)_ | SMTP server hostname. Setting it enables outbound email. |
 | `SMTP_PORT` | `587` | SMTP port (`587` for STARTTLS, `465` for SSL). |
@@ -357,10 +359,25 @@ to wipe all accounts and start over.
 ### How sign-in is protected
 
 - **Sessions** are random tokens set as an `HttpOnly`, `SameSite=Strict`
-  cookie; only a hash of the token is stored server-side, and sessions
-  expire after 12 hours. The cookie gets the `Secure` flag automatically
-  when the app sees `X-Forwarded-Proto: https` (i.e. behind a
-  TLS-terminating proxy); force it with `AUTH_FORCE_SECURE_COOKIE=true`.
+  cookie; only a hash of the token is stored server-side. The cookie gets
+  the `Secure` flag automatically when the app sees `X-Forwarded-Proto:
+  https` (i.e. behind a TLS-terminating proxy); force it with
+  `AUTH_FORCE_SECURE_COOKIE=true`.
+- **Session lifetime** is configurable:
+  - `SESSION_TTL_HOURS` (default `12`) is the **absolute maximum** — a
+    session is never valid longer than this, no matter how active.
+  - `SESSION_IDLE_MINUTES` (default `0` = off) is an optional **idle
+    timeout** — when set, a session expires this many minutes after the
+    last *user activity*, capped by the maximum above. Background dashboard
+    polling does **not** count as activity (or an open tab would never time
+    out); genuine interaction (clicks, typing, refocusing the tab) slides
+    the window. So an unattended tab is logged out after the idle window,
+    while an actively-used one stays signed in up to the maximum.
+
+  Sessions live in `auth.db` on the data mount, so they **survive container
+  restarts and upgrades** — pulling a new image does not sign everyone out.
+  A session is ended early by logging out, a password change/reset, an
+  admin resetting the account, `ADMIN_RESET`, or the account being deleted.
 - **Brute-force lockout** — after **5 failed logins for a username within
   15 minutes**, that username is locked until the window passes; the login
   API returns `429` with a `Retry-After`. A more lenient per-IP backstop

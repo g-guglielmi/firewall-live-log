@@ -138,8 +138,12 @@ def _token_hash(token):
 
 
 class AuthManager:
-    def __init__(self, db_path):
+    def __init__(self, db_path, max_ttl_sec=SESSION_TTL_SEC, idle_sec=0):
         global _DUMMY_HASH
+        # Absolute session cap and optional sliding idle timeout (0 = off).
+        self.max_ttl_sec = max_ttl_sec if max_ttl_sec and max_ttl_sec > 0 \
+            else SESSION_TTL_SEC
+        self.idle_sec = idle_sec if idle_sec and idle_sec > 0 else 0
         self.lock = threading.Lock()
         self.db = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -381,14 +385,38 @@ class AuthManager:
         token = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(32)
         now = int(time.time())
+        # First deadline: the idle window if enabled, else the absolute cap.
+        ttl = min(self.idle_sec, self.max_ttl_sec) if self.idle_sec \
+            else self.max_ttl_sec
+        expires_at = now + ttl
         with self.lock:
             self.db.execute(
                 "INSERT INTO sessions (token_hash, user_id, csrf_token, "
                 "created_at, expires_at) VALUES (?,?,?,?,?)",
-                (_token_hash(token), user_id, csrf, now,
-                 now + SESSION_TTL_SEC))
+                (_token_hash(token), user_id, csrf, now, expires_at))
             self.db.commit()
-        return token, csrf, now + SESSION_TTL_SEC
+        return token, csrf, expires_at
+
+    def touch_session(self, token):
+        """Slide a session's idle deadline forward on user activity, never
+        past the absolute cap (created_at + max_ttl). No-op when the idle
+        timeout is disabled or the session is already gone/expired."""
+        if not self.idle_sec or not token or not isinstance(token, str):
+            return
+        th = _token_hash(token)
+        now = int(time.time())
+        with self.lock:
+            row = self.db.execute(
+                "SELECT created_at, expires_at FROM sessions "
+                "WHERE token_hash = ?", (th,)).fetchone()
+            if not row or row[1] < now:
+                return
+            new_expires = min(now + self.idle_sec, row[0] + self.max_ttl_sec)
+            if new_expires > row[1]:
+                self.db.execute(
+                    "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+                    (new_expires, th))
+                self.db.commit()
 
     def get_session(self, token):
         """Return ``(user, csrf_token)`` for a valid token, else ``None``."""

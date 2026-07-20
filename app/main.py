@@ -139,7 +139,12 @@ def setup_auth():
 
     auth_db = env("AUTH_DB_PATH", "/data/auth.db")
     os.makedirs(os.path.dirname(auth_db) or ".", exist_ok=True)
-    manager = auth_mod.AuthManager(auth_db)
+    ttl_hours = max(1, int(env("SESSION_TTL_HOURS", "12")))
+    idle_minutes = max(0, int(env("SESSION_IDLE_MINUTES", "0")))
+    manager = auth_mod.AuthManager(auth_db, max_ttl_sec=ttl_hours * 3600,
+                                   idle_sec=idle_minutes * 60)
+    idle_desc = f"{idle_minutes}m idle" if idle_minutes else "no idle timeout"
+    print(f"[auth] session: max {ttl_hours}h, {idle_desc}")
 
     if env_bool("ADMIN_RESET", False):
         _reset_admin(manager)

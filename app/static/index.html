@@ -310,6 +310,18 @@ const fmt = n => Number(n).toLocaleString("en-US");
 
 /* ---------------- Auth ---------------- */
 let csrfToken = "", me = null;
+let sessionIdleOn = false, lastTouch = 0;
+// Slide the idle timeout on real user activity (not background polling),
+// throttled to at most once a minute.
+function noteActivity() {
+  if (!sessionIdleOn) return;
+  const now = Date.now();
+  if (now - lastTouch < 60000) return;
+  lastTouch = now;
+  apiSend("POST", "/api/session/touch")
+    .then(r => { if (r && r.status === 401) toLogin(); })
+    .catch(() => {});
+}
 function toLogin() { window.location.replace("/login"); }
 // Returns true if the response indicates the session is gone (caller aborts).
 function gone(res) { if (res.status === 401) { toLogin(); return true; } return false; }
@@ -326,6 +338,8 @@ async function loadMe() {
   if (gone(res)) return;
   const data = await res.json();
   me = data.user; csrfToken = data.csrf_token || "";
+  sessionIdleOn = !!(data.session && data.session.idle_minutes > 0);
+  if (sessionIdleOn) { lastTouch = 0; noteActivity(); }
   $("avatar").textContent = (me.username || "?").trim().charAt(0) || "?";
   $("userMenuBtn").title = me.username;
   $("who").innerHTML = `${esc(me.username)}<span class="rl">${esc(me.role)}</span>`;
@@ -582,6 +596,9 @@ function openPw(forced) {
   $("pwModal").classList.add("open");
 }
 function closePw() { if (!pwForced) $("pwModal").classList.remove("open"); }
+["click", "keydown", "pointerdown"].forEach(ev =>
+  document.addEventListener(ev, noteActivity, { passive: true }));
+document.addEventListener("visibilitychange", () => { if (!document.hidden) noteActivity(); });
 $("userMenuBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleUserMenu(); });
 // Clicking any menu item runs its action and closes the dropdown.
 $("userMenu").querySelectorAll(".menu-item").forEach(b =>

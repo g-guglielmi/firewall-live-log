@@ -278,10 +278,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_html("index.html")
                 return
             if path == "/api/me":
+                idle_min = (self.auth.idle_sec // 60) if self.auth else 0
+                max_hrs = (self.auth.max_ttl_sec / 3600) if self.auth else 0
                 self._json({"user": {k: user.get(k) for k in
                                      ("id", "username", "role",
                                       "must_change_pw", "email")},
-                            "csrf_token": authed[1]})
+                            "csrf_token": authed[1],
+                            "session": {"idle_minutes": idle_min,
+                                        "max_hours": max_hrs}})
                 return
             if path == "/api/users":
                 if user["role"] != "admin":
@@ -369,6 +373,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.auth.delete_session(self._cookie_token())
                 self._json({"ok": True},
                            headers=self._set_session_cookie("", 0))
+                return
+            if path == "/api/session/touch":
+                # Sent by the client on real user activity to slide the idle
+                # timeout. Background polling deliberately does NOT call this.
+                if self.auth_enabled:
+                    self.auth.touch_session(self._cookie_token())
+                self._json({"ok": True})
                 return
             if path == "/api/change_password":
                 self._handle_change_password(user)
@@ -459,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
                       "role": user["role"],
                       "must_change_pw": user["must_change_pw"]}},
             headers=self._set_session_cookie(
-                token, auth_mod.SESSION_TTL_SEC))
+                token, self.auth.max_ttl_sec))
 
     def _handle_change_password(self, user):
         body = self._read_json_body()

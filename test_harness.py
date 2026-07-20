@@ -567,6 +567,34 @@ def main():
               "ADMIN_PASSWORD", "ADMIN_RESET"):
         os.environ.pop(k, None)
 
+    print("== session idle timeout + max ttl ==")
+    # Uses whole-second deadlines, so margins are >1s to avoid boundary flake.
+    import auth as authmod
+    am = authmod.AuthManager(os.path.join(tmp, "sess1.db"),
+                             max_ttl_sec=3600, idle_sec=2)   # 2s idle, 1h cap
+    su = am.create_user("sessuser", "SessPass123456")
+    tok, _, _ = am.create_session(su)
+    check("session valid immediately after login", am.get_session(tok) is not None)
+    time.sleep(3.3)
+    check("session idles out after the idle timeout", am.get_session(tok) is None)
+    tok2, _, _ = am.create_session(su)
+    time.sleep(1.2)
+    am.touch_session(tok2)              # user activity slides the window
+    time.sleep(1.2)                     # 2.4s since login, but touched at 1.2s
+    check("activity (touch) extends the idle window",
+          am.get_session(tok2) is not None)
+    am.close()
+    # Absolute cap wins even with constant activity: 1s cap, 60s idle.
+    am2 = authmod.AuthManager(os.path.join(tmp, "sess2.db"),
+                              max_ttl_sec=1, idle_sec=60)
+    cu = am2.create_user("capuser", "CapPass1234567")
+    tokc, _, _ = am2.create_session(cu)
+    am2.touch_session(tokc)            # would extend to +60s, but cap is +1s
+    time.sleep(2.5)
+    check("max ttl caps the session despite activity",
+          am2.get_session(tokc) is None)
+    am2.close()
+
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
     # (PRUNE_INTERVAL_SEC=2). A concurrent short-lived writer is fine in WAL.
