@@ -355,6 +355,15 @@ class AuthManager:
                             (_token_hash(token),))
             self.db.commit()
 
+    def clear_lockout(self, username):
+        """Delete a username's failed-login history so a prior lockout does
+        not block a freshly reset account."""
+        with self.lock:
+            self.db.execute(
+                "DELETE FROM login_attempts WHERE username = ? "
+                "COLLATE NOCASE AND success = 0", (username,))
+            self.db.commit()
+
     def prune(self):
         now = int(time.time())
         with self.lock:

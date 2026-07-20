@@ -421,6 +421,39 @@ def main():
     code, _ = op2_json("/api/stats", None, method="GET")
     check("session invalid after logout (401)", code == 401, str(code))
 
+    print("== admin reset (ADMIN_RESET) ==")
+    # Exercise setup_auth()'s bootstrap + reset wiring in-process against a
+    # throwaway auth DB (independent of the running app's DB).
+    sys.path.insert(0, os.path.join(HERE, "app"))
+    import main as app_main
+    reset_db = os.path.join(tmp, "reset-auth.db")
+    for k in ("AUTH_ENABLED", "AUTH_DB_PATH", "ADMIN_USERNAME",
+              "ADMIN_PASSWORD", "ADMIN_RESET"):
+        os.environ.pop(k, None)
+    os.environ.update(AUTH_ENABLED="true", AUTH_DB_PATH=reset_db,
+                      ADMIN_USERNAME="admin", ADMIN_PASSWORD="Initial-Pass-1234")
+    m1 = app_main.setup_auth()
+    # Lock the account out, to prove reset clears the lockout too.
+    for _ in range(5):
+        m1.verify_login("admin", "nope-nope-nope", "10.0.0.9")
+    locked, _, retry = m1.verify_login("admin", "Initial-Pass-1234", "10.0.0.9")
+    check("account locked before reset", locked is None and retry > 0,
+          str(retry))
+    m1.close()
+    # Forgot the password: recover via ADMIN_RESET with a new password.
+    os.environ.update(ADMIN_RESET="true", ADMIN_PASSWORD="Recovered-Pass-9876")
+    m2 = app_main.setup_auth()
+    u, e, _ = m2.verify_login("admin", "Recovered-Pass-9876", "10.0.0.9")
+    check("ADMIN_RESET sets the new admin password", u is not None and e is None,
+          str(e))
+    check("reset account is admin", u and u["role"] == "admin", str(u))
+    old, _, _ = m2.verify_login("admin", "Initial-Pass-1234", "10.0.0.10")
+    check("old admin password rejected after reset", old is None)
+    m2.close()
+    for k in ("AUTH_ENABLED", "AUTH_DB_PATH", "ADMIN_USERNAME",
+              "ADMIN_PASSWORD", "ADMIN_RESET"):
+        os.environ.pop(k, None)
+
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
     # (PRUNE_INTERVAL_SEC=2). A concurrent short-lived writer is fine in WAL.

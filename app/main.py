@@ -47,8 +47,70 @@ def env_bool(name, default=False):
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _admin_password():
+    """Return (password, supplied). Uses ADMIN_PASSWORD if set, otherwise a
+    strong generated one the caller should print."""
+    supplied = env("ADMIN_PASSWORD")
+    return (supplied or secrets.token_urlsafe(18)), bool(supplied)
+
+
+def _print_generated_password(action, username, password):
+    print("[auth] " + "=" * 60)
+    print(f"[auth] {action} {username!r} with a generated password:")
+    print(f"[auth]     {password}")
+    print("[auth] Log in and change it now — it will not be shown again.")
+    print("[auth] " + "=" * 60)
+
+
+def _bootstrap_admin(manager):
+    username = env("ADMIN_USERNAME", "admin")
+    password, supplied = _admin_password()
+    try:
+        manager.create_user(username, password, role="admin",
+                            must_change_pw=not supplied)
+    except auth_mod.AuthError as e:
+        print(f"[auth] could not create default admin: {e}", file=sys.stderr)
+        sys.exit(2)
+    if supplied:
+        print(f"[auth] created default admin {username!r} from ADMIN_PASSWORD")
+    else:
+        _print_generated_password("created default admin user", username,
+                                  password)
+    sys.stdout.flush()
+
+
+def _reset_admin(manager):
+    """ADMIN_RESET recovery: (re)set the admin account even when users exist,
+    clearing any lockout and revoking its sessions. Used to recover a
+    forgotten admin password without another account."""
+    username = env("ADMIN_USERNAME", "admin")
+    password, supplied = _admin_password()
+    existing = manager.get_user_by_name(username)
+    try:
+        if existing:
+            manager.set_password(existing["id"], password,
+                                must_change_pw=not supplied)
+            manager.set_role(existing["id"], "admin")
+            action = "reset password for admin"
+        else:
+            manager.create_user(username, password, role="admin",
+                                must_change_pw=not supplied)
+            action = "created admin"
+        manager.clear_lockout(username)
+    except auth_mod.AuthError as e:
+        print(f"[auth] ADMIN_RESET failed: {e}", file=sys.stderr)
+        sys.exit(2)
+    if supplied:
+        print(f"[auth] ADMIN_RESET: {action} {username!r} from ADMIN_PASSWORD")
+    else:
+        _print_generated_password(f"ADMIN_RESET: {action}", username, password)
+    print("[auth] IMPORTANT: unset ADMIN_RESET now, or it re-runs on every "
+          "restart.")
+    sys.stdout.flush()
+
+
 def setup_auth():
-    """Open the auth DB and, on an empty user table, bootstrap an admin.
+    """Open the auth DB and bootstrap or reset the admin as needed.
 
     Returns the AuthManager (or None when auth is disabled)."""
     if not env_bool("AUTH_ENABLED", True):
@@ -60,29 +122,10 @@ def setup_auth():
     os.makedirs(os.path.dirname(auth_db) or ".", exist_ok=True)
     manager = auth_mod.AuthManager(auth_db)
 
-    if manager.user_count() == 0:
-        username = env("ADMIN_USERNAME", "admin")
-        supplied = env("ADMIN_PASSWORD")
-        password = supplied or secrets.token_urlsafe(18)
-        try:
-            manager.create_user(username, password, role="admin",
-                                must_change_pw=not supplied)
-        except auth_mod.AuthError as e:
-            print(f"[auth] could not create default admin: {e}",
-                  file=sys.stderr)
-            sys.exit(2)
-        if supplied:
-            print(f"[auth] created default admin {username!r} from "
-                  f"ADMIN_PASSWORD")
-        else:
-            print("[auth] " + "=" * 60)
-            print(f"[auth] created default admin user {username!r} with a "
-                  f"generated password:")
-            print(f"[auth]     {password}")
-            print("[auth] Log in and change it now — it will not be shown "
-                  "again.")
-            print("[auth] " + "=" * 60)
-        sys.stdout.flush()
+    if env_bool("ADMIN_RESET", False):
+        _reset_admin(manager)
+    elif manager.user_count() == 0:
+        _bootstrap_admin(manager)
     return manager
 
 

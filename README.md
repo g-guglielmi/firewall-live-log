@@ -193,7 +193,8 @@ Editing `devices.json` takes effect on container restart.
 | `AUTH_ENABLED` | `true` | Require login. Set `false` **only** behind an authenticating reverse proxy. |
 | `AUTH_DB_PATH` | `/data/auth.db` | SQLite file for users and sessions. |
 | `ADMIN_USERNAME` | `admin` | Username of the bootstrap admin (first start only). |
-| `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin. If unset, a random one is printed to the logs once and must be changed at first login. |
+| `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
+| `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie (otherwise auto-set when `X-Forwarded-Proto: https` is seen). |
 
 ## Sizing & retention
@@ -275,6 +276,31 @@ Once logged in, the admin can create more accounts from the **Users** panel
 
 Passwords must be at least 12 characters. The last remaining admin can't be
 deleted or demoted, so you can't lock yourself out.
+
+### Forgot the admin password?
+
+If you're locked out and have no other admin, recover in place with
+`ADMIN_RESET`. Set `ADMIN_RESET=true` **and** `ADMIN_PASSWORD` to a new
+password, then restart the container:
+
+```sh
+docker run -d --name firewall-live-log --restart unless-stopped \
+  --network host -v /srv/firewall-live-log:/data \
+  -e ADMIN_RESET=true -e ADMIN_PASSWORD='my-new-strong-password' \
+  ghcr.io/g-guglielmi/firewall-live-log:latest
+# (or edit these two variables on the existing container and restart)
+```
+
+On start this resets the `ADMIN_USERNAME` account (default `admin`): it
+sets the new password, ensures the account is an admin, clears any
+brute-force lockout, and revokes its old sessions — **without touching any
+other user or your event history**. If you leave `ADMIN_PASSWORD` blank, a
+random password is generated and printed to the logs instead.
+
+**Then remove `ADMIN_RESET`** (set it back to `false` or delete the
+variable) and restart — otherwise the admin password is reset on every
+start. As a last resort you can still delete `auth.db` from the data mount
+to wipe all accounts and start over.
 
 ### How sign-in is protected
 
