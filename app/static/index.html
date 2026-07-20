@@ -158,6 +158,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 .modal .msg.ok { background:var(--tint-good); border-color:var(--good); }
 .utable { width:100%; margin-top:8px; }
 .utable td, .utable th { padding:6px 8px; border-bottom:1px solid var(--grid); font-size:13px; }
+.rolesel { width:auto; padding:3px 7px; font-size:12.5px; }
 .tag { font-size:11px; border:1px solid var(--border); border-radius:999px; padding:1px 8px; color:var(--ink-2); }
 </style>
 </head>
@@ -621,7 +622,12 @@ async function refreshUsers() {
   const data = await res.json();
   $("userRows").innerHTML = (data.users || []).map(u => `
     <tr><td><b>${esc(u.username)}</b></td>
-    <td><span class="tag">${esc(u.role)}</span></td>
+    <td>${u.id === me.id
+      ? `<span class="tag">${esc(u.role)}</span>`
+      : `<select class="rolesel" data-role="${u.id}" data-name="${esc(u.username)}">
+           <option value="user"${u.role === "user" ? " selected" : ""}>user</option>
+           <option value="admin"${u.role === "admin" ? " selected" : ""}>admin</option>
+         </select>`}</td>
     <td>${u.email ? esc(u.email) : '<span class="sub">no email</span>'}</td>
     <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
     <td style="text-align:right">
@@ -633,6 +639,21 @@ async function refreshUsers() {
     b.addEventListener("click", () => deleteUser(b.dataset.del, b.dataset.name)));
   $("userRows").querySelectorAll("[data-email]").forEach(b =>
     b.addEventListener("click", () => editEmail(b.dataset.email, b.dataset.cur)));
+  $("userRows").querySelectorAll("[data-role]").forEach(s =>
+    s.addEventListener("change", () => setRole(s.dataset.role, s.value, s.dataset.name)));
+}
+async function setRole(id, role, name) {
+  const res = await apiSend("POST", "/api/users/set_role",
+    { id: Number(id), role });
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) {
+    modalMsg("usersMsg", data.error || "Could not change role.");
+    refreshUsers();   // revert the dropdown to the server's value
+    return;
+  }
+  modalMsg("usersMsg", `${name} is now ${role}.`, true);
+  refreshUsers();
 }
 async function editEmail(id, current) {
   const email = window.prompt("Email address for this user (blank to clear):", current || "");

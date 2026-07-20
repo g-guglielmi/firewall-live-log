@@ -283,13 +283,18 @@ Once logged in, the admin can create more accounts from the **Users** panel
 - **admin** — view everything *and* manage users.
 - **user** — view the dashboard only.
 
-Each account can have an **email** attached (set it when creating the user,
-per-row in the Users panel, or via the **Email** button in the top bar for
-your own account). An email is what enables self-service password reset,
-below.
+A user's role is set when you create it and can be changed later from the
+per-row **role dropdown** in the Users panel (promote to admin / demote to
+user). You can't change your own role, and the last remaining admin can't be
+demoted or deleted, so there's always at least one admin and you can't lock
+yourself out.
 
-Passwords must be at least 12 characters. The last remaining admin can't be
-deleted or demoted, so you can't lock yourself out.
+Each account can have an **email** attached (set it when creating the user,
+per-row in the Users panel, or via the **Set email** item in the account
+menu for your own account). An email is what enables self-service password
+reset, below.
+
+Passwords must be at least 12 characters.
 
 ### Self-service password reset (email)
 

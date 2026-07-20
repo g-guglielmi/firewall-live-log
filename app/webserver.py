@@ -382,6 +382,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/users/set_email":
                 self._handle_set_email(user)
                 return
+            if path == "/api/users/set_role":
+                self._handle_set_role(user)
+                return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
             self._json({"error": str(e)}, e.code)
@@ -510,6 +513,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "admin required"}, 403)
             return
         self.auth.set_email(target, body.get("email"))
+        self._json({"ok": True})
+
+    def _handle_set_role(self, user):
+        if user["role"] != "admin":
+            self._json({"error": "admin required"}, 403)
+            return
+        body = self._read_json_body()
+        target = body.get("id")
+        role = body.get("role")
+        if not isinstance(target, int):
+            self._json({"error": "id must be an integer"}, 400)
+            return
+        # Don't let an admin demote themselves mid-session and get locked out
+        # of user management. set_role() also guards the last admin globally.
+        if target == user["id"] and role != "admin":
+            self._json({"error": "you can't change your own admin role"}, 400)
+            return
+        self.auth.set_role(target, role)
         self._json({"ok": True})
 
     # -- public self-service password reset --------------------------------

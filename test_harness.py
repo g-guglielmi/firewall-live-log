@@ -407,6 +407,33 @@ def main():
                        csrf=v_csrf)
     check("non-admin cannot create users (403)", code == 403, str(code))
 
+    print("== role management ==")
+    _, ulist, _ = request("GET", "/api/users")
+    by_name = {u["username"]: u for u in ulist.get("users", [])}
+    viewer_id = by_name.get("viewer1", {}).get("id")
+    admin_id = by_name.get(ADMIN_USER, {}).get("id")
+    code, _, _ = request("POST", "/api/users/set_role",
+                        {"id": viewer_id, "role": "admin"}, csrf=True)
+    check("admin promotes a user to admin (200)", code == 200, str(code))
+    _, ul2, _ = request("GET", "/api/users")
+    check("role is now admin", any(u["username"] == "viewer1"
+          and u["role"] == "admin" for u in ul2.get("users", [])))
+    code, _, _ = request("POST", "/api/users/set_role",
+                        {"id": viewer_id, "role": "user"}, csrf=True)
+    check("admin demotes back to user (200)", code == 200, str(code))
+    code, _, _ = request("POST", "/api/users/set_role",
+                        {"id": viewer_id, "role": "superuser"}, csrf=True)
+    check("invalid role rejected (400)", code == 400, str(code))
+    code, _, _ = request("POST", "/api/users/set_role",
+                        {"id": admin_id, "role": "user"}, csrf=True)
+    check("admin can't demote their own role (400)", code == 400, str(code))
+    code, _, _ = request("POST", "/api/users/set_role",
+                        {"id": viewer_id, "role": "admin"}, csrf=False)
+    check("set_role without CSRF rejected (403)", code == 403, str(code))
+    code, _ = op2_json("/api/users/set_role",
+                       {"id": viewer_id, "role": "admin"}, csrf=v_csrf)
+    check("non-admin cannot set roles (403)", code == 403, str(code))
+
     print("== rate limiting (5 fails / 15 min) ==")
     for i in range(5):
         code, _, _ = request("POST", "/api/login",
