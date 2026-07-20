@@ -110,6 +110,35 @@ tbody tr.ev-block td { background:var(--tint-bad); }
 tbody tr.ev-nat td { background:var(--tint-nat); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .empty-note { color:var(--muted); padding:18px 4px; }
+
+/* user bar + modal (auth) */
+.userbar { display:inline-flex; align-items:center; gap:10px; font-size:12.5px; }
+.userbar .who { color:var(--ink-2); }
+.userbar .who b { color:var(--ink); font-weight:650; }
+.linkbtn { background:none; border:0; padding:0; color:var(--accent);
+  cursor:pointer; font:inherit; }
+.linkbtn:hover { text-decoration:underline; }
+.modal-back { position:fixed; inset:0; background:rgba(0,0,0,0.45);
+  display:none; align-items:flex-start; justify-content:center; z-index:50;
+  padding:40px 16px; overflow-y:auto; }
+.modal-back.open { display:flex; }
+.modal { background:var(--surface); border:1px solid var(--border);
+  border-radius:14px; padding:20px 22px; width:100%; max-width:560px; }
+.modal h3 { margin:0 0 4px; font-size:16px; }
+.modal .sub { margin-bottom:14px; }
+.modal label { display:block; font-size:12.5px; color:var(--ink-2); margin:12px 0 4px; }
+.modal input, .modal select { width:100%; font:inherit; color:var(--ink);
+  background:var(--page); border:1px solid var(--border); border-radius:9px; padding:8px 10px; }
+.modal .row2 { display:flex; gap:10px; flex-wrap:wrap; }
+.modal .row2 > div { flex:1; min-width:140px; }
+.modal .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
+.modal button.primary { color:#fff; background:var(--accent); border:0; }
+.modal .msg { display:none; margin-top:12px; padding:8px 11px; border-radius:9px;
+  background:var(--tint-bad); border:1px solid var(--critical); font-size:12.5px; }
+.modal .msg.ok { background:var(--tint-good); border-color:var(--good); }
+.utable { width:100%; margin-top:8px; }
+.utable td, .utable th { padding:6px 8px; border-bottom:1px solid var(--grid); font-size:13px; }
+.tag { font-size:11px; border:1px solid var(--border); border-radius:999px; padding:1px 8px; color:var(--ink-2); }
 </style>
 </head>
 <body>
@@ -119,6 +148,12 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     <span class="sub" id="updated">loading…</span>
     <span class="spacer"></span>
     <span class="pill" id="fleetPill"><span class="dot s-nodata"></span> —</span>
+    <span class="userbar" id="userbar" style="display:none">
+      <span class="who" id="who"></span>
+      <button class="linkbtn" id="usersBtn" style="display:none">Users</button>
+      <button class="linkbtn" id="pwBtn">Change password</button>
+      <button class="linkbtn" id="logoutBtn">Log out</button>
+    </span>
   </header>
 
   <div class="error-banner" id="banner"></div>
@@ -172,6 +207,55 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   </div>
 </div>
 
+<!-- Change-password modal -->
+<div class="modal-back" id="pwModal">
+  <div class="modal">
+    <h3>Change your password</h3>
+    <div class="sub">You'll be signed out and asked to log in again.</div>
+    <label for="pwCur">Current password</label>
+    <input id="pwCur" type="password" autocomplete="current-password" maxlength="1024">
+    <label for="pwNew">New password (min 12 characters)</label>
+    <input id="pwNew" type="password" autocomplete="new-password" maxlength="1024">
+    <label for="pwNew2">Confirm new password</label>
+    <input id="pwNew2" type="password" autocomplete="new-password" maxlength="1024">
+    <div class="msg" id="pwMsg"></div>
+    <div class="actions">
+      <button id="pwCancel">Cancel</button>
+      <button class="primary" id="pwSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- User-management modal (admin) -->
+<div class="modal-back" id="usersModal">
+  <div class="modal">
+    <h3>Users</h3>
+    <div class="sub">Create and remove dashboard accounts.</div>
+    <table class="utable"><tbody id="userRows"></tbody></table>
+    <h3 style="margin-top:18px;font-size:14px">Add a user</h3>
+    <div class="row2">
+      <div>
+        <label for="nuName">Username</label>
+        <input id="nuName" type="text" maxlength="64" autocomplete="off">
+      </div>
+      <div>
+        <label for="nuRole">Role</label>
+        <select id="nuRole">
+          <option value="user">user (view only)</option>
+          <option value="admin">admin (can manage users)</option>
+        </select>
+      </div>
+    </div>
+    <label for="nuPass">Password (min 12 characters)</label>
+    <input id="nuPass" type="text" maxlength="1024" autocomplete="off">
+    <div class="msg" id="usersMsg"></div>
+    <div class="actions">
+      <button id="usersClose">Close</button>
+      <button class="primary" id="nuCreate">Create user</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
@@ -186,6 +270,30 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n).toLocaleString("en-US");
+
+/* ---------------- Auth ---------------- */
+let csrfToken = "", me = null;
+function toLogin() { window.location.replace("/login"); }
+// Returns true if the response indicates the session is gone (caller aborts).
+function gone(res) { if (res.status === 401) { toLogin(); return true; } return false; }
+async function apiSend(method, url, body) {
+  return fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+async function loadMe() {
+  let res;
+  try { res = await fetch("/api/me"); } catch (e) { return; }
+  if (gone(res)) return;
+  const data = await res.json();
+  me = data.user; csrfToken = data.csrf_token || "";
+  $("who").innerHTML = `signed in as <b>${esc(me.username)}</b> <span class="tag">${esc(me.role)}</span>`;
+  $("usersBtn").style.display = me.role === "admin" ? "" : "none";
+  $("userbar").style.display = "";
+  if (me.must_change_pw) { openPw(true); }
+}
 
 let view = "overview";      // "overview" or a device name
 let stats = null;
@@ -307,7 +415,8 @@ async function pollLive() {
   const gen = fetchGen;
   try {
     const p = filterQuery(); p.set("since", cursor);
-    const res = await (await fetch("/api/live?" + p)).json();
+    const r = await fetch("/api/live?" + p); if (gone(r)) return;
+    const res = await r.json();
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     if (res.cursor < cursor) events = [];   // db pruned / restarted
@@ -324,7 +433,8 @@ async function loadWindow() {
   const gen = fetchGen;
   try {
     const p = filterQuery(); p.set("window", $("fMode").value); p.set("limit", "2000");
-    const res = await (await fetch("/api/events?" + p)).json();
+    const r = await fetch("/api/events?" + p); if (gone(r)) return;
+    const res = await r.json();
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     events = res.events.slice().reverse();
@@ -376,7 +486,8 @@ function showError(e) {
 
 async function loadStats() {
   try {
-    const s = await (await fetch("/api/stats")).json();
+    const r = await fetch("/api/stats"); if (gone(r)) return;
+    const s = await r.json();
     stats = s;
     renderTabs(); renderFleetPill();
     if (view === "overview") renderOverview(); else updateSysStatus();
@@ -400,6 +511,88 @@ $("fClear").addEventListener("click", () => {
 $("backBtn").addEventListener("click", () => go("overview"));
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 
+/* ---------------- Auth UI ---------------- */
+function modalMsg(id, text, ok) {
+  const m = $(id);
+  m.textContent = text; m.className = "msg" + (ok ? " ok" : "");
+  m.style.display = text ? "block" : "none";
+}
+let pwForced = false;
+function openPw(forced) {
+  pwForced = !!forced;
+  ["pwCur","pwNew","pwNew2"].forEach(id => $(id).value = "");
+  modalMsg("pwMsg", "");
+  $("pwCancel").style.display = forced ? "none" : "";
+  $("pwModal").classList.add("open");
+}
+function closePw() { if (!pwForced) $("pwModal").classList.remove("open"); }
+$("pwBtn").addEventListener("click", () => openPw(false));
+$("pwCancel").addEventListener("click", closePw);
+$("pwSave").addEventListener("click", async () => {
+  const cur = $("pwCur").value, n1 = $("pwNew").value, n2 = $("pwNew2").value;
+  if (n1.length < 12) return modalMsg("pwMsg", "New password must be at least 12 characters.");
+  if (n1 !== n2) return modalMsg("pwMsg", "New passwords do not match.");
+  try {
+    const res = await apiSend("POST", "/api/change_password",
+      { current_password: cur, new_password: n1 });
+    if (gone(res)) return;
+    const data = await res.json();
+    if (!res.ok) return modalMsg("pwMsg", data.error || "Could not change password.");
+    modalMsg("pwMsg", "Password changed. Redirecting to sign in…", true);
+    setTimeout(toLogin, 900);
+  } catch (e) { modalMsg("pwMsg", "Network error."); }
+});
+
+function openUsers() {
+  modalMsg("usersMsg", "");
+  ["nuName","nuPass"].forEach(id => $(id).value = ""); $("nuRole").value = "user";
+  $("usersModal").classList.add("open");
+  refreshUsers();
+}
+async function refreshUsers() {
+  const res = await fetch("/api/users"); if (gone(res)) return;
+  if (res.status === 403) { modalMsg("usersMsg", "Admin access required."); return; }
+  const data = await res.json();
+  $("userRows").innerHTML = (data.users || []).map(u => `
+    <tr><td><b>${esc(u.username)}</b></td>
+    <td><span class="tag">${esc(u.role)}</span></td>
+    <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
+    <td style="text-align:right">${u.id === me.id ? '<span class="sub">you</span>'
+      : `<button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}</td></tr>`).join("");
+  $("userRows").querySelectorAll("[data-del]").forEach(b =>
+    b.addEventListener("click", () => deleteUser(b.dataset.del, b.dataset.name)));
+}
+async function deleteUser(id, name) {
+  if (!window.confirm("Delete user " + name + "?")) return;
+  const res = await apiSend("DELETE", "/api/users/" + encodeURIComponent(id));
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) return modalMsg("usersMsg", data.error || "Delete failed.");
+  modalMsg("usersMsg", "Deleted " + name + ".", true);
+  refreshUsers();
+}
+$("usersBtn").addEventListener("click", openUsers);
+$("usersClose").addEventListener("click", () => $("usersModal").classList.remove("open"));
+$("nuCreate").addEventListener("click", async () => {
+  const username = $("nuName").value.trim(), password = $("nuPass").value,
+        role = $("nuRole").value;
+  if (password.length < 12) return modalMsg("usersMsg", "Password must be at least 12 characters.");
+  try {
+    const res = await apiSend("POST", "/api/users", { username, password, role });
+    if (gone(res)) return;
+    const data = await res.json();
+    if (!res.ok) return modalMsg("usersMsg", data.error || "Could not create user.");
+    modalMsg("usersMsg", "Created " + username + ".", true);
+    $("nuName").value = ""; $("nuPass").value = "";
+    refreshUsers();
+  } catch (e) { modalMsg("usersMsg", "Network error."); }
+});
+$("logoutBtn").addEventListener("click", async () => {
+  try { await apiSend("POST", "/api/logout"); } catch (e) {}
+  toLogin();
+});
+
+loadMe();
 loadStats();
 setInterval(loadStats, 5000);
 liveTimer = setInterval(pollLive, 2000);

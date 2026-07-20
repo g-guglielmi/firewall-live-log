@@ -21,10 +21,13 @@ Per-device vendor is auto|unifi|sophos (see devices.json).
 
 import os
 import queue
+import secrets
 import signal
 import sys
 import threading
+import time
 
+import auth as auth_mod
 import config
 import listener
 import store
@@ -35,6 +38,52 @@ import writer
 def env(name, default=None):
     v = os.environ.get(name)
     return v if v not in (None, "") else default
+
+
+def env_bool(name, default=False):
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def setup_auth():
+    """Open the auth DB and, on an empty user table, bootstrap an admin.
+
+    Returns the AuthManager (or None when auth is disabled)."""
+    if not env_bool("AUTH_ENABLED", True):
+        print("[auth] AUTH_ENABLED=false — dashboard is UNPROTECTED; only do "
+              "this behind an authenticating reverse proxy", file=sys.stderr)
+        return None
+
+    auth_db = env("AUTH_DB_PATH", "/data/auth.db")
+    os.makedirs(os.path.dirname(auth_db) or ".", exist_ok=True)
+    manager = auth_mod.AuthManager(auth_db)
+
+    if manager.user_count() == 0:
+        username = env("ADMIN_USERNAME", "admin")
+        supplied = env("ADMIN_PASSWORD")
+        password = supplied or secrets.token_urlsafe(18)
+        try:
+            manager.create_user(username, password, role="admin",
+                                must_change_pw=not supplied)
+        except auth_mod.AuthError as e:
+            print(f"[auth] could not create default admin: {e}",
+                  file=sys.stderr)
+            sys.exit(2)
+        if supplied:
+            print(f"[auth] created default admin {username!r} from "
+                  f"ADMIN_PASSWORD")
+        else:
+            print("[auth] " + "=" * 60)
+            print(f"[auth] created default admin user {username!r} with a "
+                  f"generated password:")
+            print(f"[auth]     {password}")
+            print("[auth] Log in and change it now — it will not be shown "
+                  "again.")
+            print("[auth] " + "=" * 60)
+        sys.stdout.flush()
+    return manager
 
 
 def main():
@@ -55,6 +104,10 @@ def main():
         cfg.retention_days = int(env("RETENTION_DAYS"))
     if env("MAX_EVENTS"):
         cfg.max_events = int(env("MAX_EVENTS"))
+
+    auth_enabled = env_bool("AUTH_ENABLED", True)
+    force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
+    auth_manager = setup_auth()
 
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     # Create the schema synchronously so the web server's read-only
@@ -88,11 +141,15 @@ def main():
         listener_threads.append(t)
 
     state = webserver.AppState(db_path, cfg.devices, cfg)
-    httpd = webserver.serve(state, http_bind, http_port)
+    httpd = webserver.serve(state, http_bind, http_port,
+                            auth_manager=auth_manager,
+                            auth_enabled=auth_enabled,
+                            force_secure_cookie=force_secure)
     threading.Thread(target=httpd.serve_forever, name="web",
                      daemon=True).start()
 
     writer_died = False
+    last_auth_prune = 0.0
     while not stop_event.is_set():
         stop_event.wait(1.0)
         if not writer_thread.is_alive() and not stop_event.is_set():
@@ -100,10 +157,21 @@ def main():
                   file=sys.stderr)
             writer_died = True
             stop_event.set()
+        # Periodically sweep expired sessions and stale login attempts.
+        if auth_manager is not None:
+            now = time.monotonic()
+            if now - last_auth_prune >= 3600:
+                try:
+                    auth_manager.prune()
+                except Exception as e:      # never let housekeeping kill main
+                    print(f"[auth] prune error: {e}", file=sys.stderr)
+                last_auth_prune = now
 
     print("[main] shutting down...")
     httpd.shutdown()
     writer_thread.join(timeout=20)
+    if auth_manager is not None:
+        auth_manager.close()
     print("[main] bye")
     if writer_died:
         sys.exit(1)

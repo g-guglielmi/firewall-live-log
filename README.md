@@ -73,6 +73,12 @@ every configured system and turns green as logs arrive. Point each
 firewall's syslog at this host on the port you assigned it, then click a
 system to watch its live log.
 
+The dashboard requires a login. On first start it creates an `admin`
+account and prints a generated password to the logs
+(`docker logs firewall-live-log`); log in and change it, or set your own
+with `-e ADMIN_PASSWORD=…` on the `docker run`. See
+[Authentication](#authentication) for details.
+
 Pin a version for reproducible deploys:
 `ghcr.io/g-guglielmi/firewall-live-log:v0.0.1`
 (all versions under [Packages](https://github.com/g-guglielmi/firewall-live-log/pkgs/container/firewall-live-log)).
@@ -184,6 +190,11 @@ Editing `devices.json` takes effect on container restart.
 | `MAX_EVENTS` | `0` | Row-count cap (0 = off); overrides config. |
 | `PRUNE_INTERVAL_SEC` | `3600` | How often retention is enforced. |
 | `QUEUE_MAX` | `100000` | In-flight events before overflow drops. |
+| `AUTH_ENABLED` | `true` | Require login. Set `false` **only** behind an authenticating reverse proxy. |
+| `AUTH_DB_PATH` | `/data/auth.db` | SQLite file for users and sessions. |
+| `ADMIN_USERNAME` | `admin` | Username of the bootstrap admin (first start only). |
+| `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin. If unset, a random one is printed to the logs once and must be changed at first login. |
+| `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie (otherwise auto-set when `X-Forwarded-Proto: https` is seen). |
 
 ## Sizing & retention
 
@@ -228,10 +239,75 @@ filters, retention pruning, CSV export, and a graceful-stop final flush.
 The same harness gates CI and every release. It also runs directly with
 `python3 test_harness.py` on Linux/macOS/Windows.
 
+## Authentication
+
+The dashboard requires a login. Accounts live in a dedicated SQLite file
+(`auth.db`, next to `events.db` on the data mount); passwords are stored
+only as salted **PBKDF2-HMAC-SHA256** hashes (600k iterations), never in
+clear text. Everything here is still pure Python standard library — no new
+dependencies.
+
+### First start — the default admin
+
+On its first start with an empty user database, the app creates one
+**admin** account:
+
+- If you set `ADMIN_PASSWORD` (and optionally `ADMIN_USERNAME`, default
+  `admin`), the admin is created with that password.
+- If you don't, a strong random password is generated, printed **once** to
+  the container logs, and the admin must change it at first login:
+
+  ```
+  [auth] ============================================================
+  [auth] created default admin user 'admin' with a generated password:
+  [auth]     Xy7…redacted…aQ
+  [auth] Log in and change it now — it will not be shown again.
+  [auth] ============================================================
+  ```
+
+  Read it with `docker logs firewall-live-log`.
+
+Once logged in, the admin can create more accounts from the **Users** panel
+(top-right of the dashboard). There are two roles:
+
+- **admin** — view everything *and* manage users.
+- **user** — view the dashboard only.
+
+Passwords must be at least 12 characters. The last remaining admin can't be
+deleted or demoted, so you can't lock yourself out.
+
+### How sign-in is protected
+
+- **Sessions** are random tokens set as an `HttpOnly`, `SameSite=Strict`
+  cookie; only a hash of the token is stored server-side, and sessions
+  expire after 12 hours. The cookie gets the `Secure` flag automatically
+  when the app sees `X-Forwarded-Proto: https` (i.e. behind a
+  TLS-terminating proxy); force it with `AUTH_FORCE_SECURE_COOKIE=true`.
+- **Brute-force lockout** — after **5 failed logins for a username within
+  15 minutes**, that username is locked until the window passes; the login
+  API returns `429` with a `Retry-After`. A more lenient per-IP backstop
+  catches username-spraying, and unknown usernames still run a full
+  password hash so response timing never reveals whether a user exists.
+- **CSRF** — every state-changing request must also carry a session-bound
+  token in the `X-CSRF-Token` header.
+- All SQL is parameterised, all dynamic output is HTML-escaped, static
+  files are served by fixed name only, and every response carries
+  `Content-Security-Policy` (with a per-response script nonce),
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  `Referrer-Policy: no-referrer`.
+
+For internet-facing deployments, still terminate TLS at a reverse proxy in
+front of the container — the app itself speaks plain HTTP.
+
+### Already have an auth proxy?
+
+If access is already enforced by an authenticating reverse proxy and you
+don't want the built-in login, set `AUTH_ENABLED=false`. **Only do this
+when something else gates access** — with it off, the dashboard and API are
+completely open.
+
 ## Security notes
 
-- The dashboard has **no authentication** — run it on a management
-  network or behind an authenticating reverse proxy.
 - Firewall logs are sensitive metadata about your network; protect the
   bind-mounted data directory accordingly.
 - The container runs as a non-root user (uid 10001); the bind-mounted

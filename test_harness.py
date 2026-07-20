@@ -14,6 +14,7 @@ Runs on Linux/macOS (SIGTERM) and Windows (CTRL_BREAK):
 Exit code 0 = all checks pass.  Loopback only.
 """
 
+import http.cookiejar
 import json
 import os
 import signal
@@ -36,6 +37,45 @@ if not os.path.exists(MAIN):
 P_UNIFI, P_SOPHOS, P_AUTO = 15514, 15515, 15516
 HTTP_PORT = 18099
 BASE = f"http://127.0.0.1:{HTTP_PORT}"
+
+ADMIN_USER = "admin"
+ADMIN_PASS = "harness-Admin-Pass-9271!"   # >= 12 chars for the policy
+
+# A cookie-jar opener carries the session cookie across authenticated calls.
+_CJ = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_CJ))
+_CSRF = {"token": ""}
+
+
+class _NoRedirect(urllib.request.HTTPErrorProcessor):
+    """Return 3xx/4xx responses verbatim instead of following/raising, so a
+    redirect can be inspected."""
+
+    def http_response(self, request, response):
+        return response
+
+    https_response = http_response
+
+
+def request(method, path, obj=None, csrf=False):
+    """Return (status_code, parsed_json_or_{}, response). Never raises on a
+    non-2xx status — HTTPError is unwrapped so checks can inspect the code."""
+    data = json.dumps(obj).encode() if obj is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if csrf:
+        req.add_header("X-CSRF-Token", _CSRF["token"])
+    try:
+        r = _OPENER.open(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        r = e
+    body = r.read()
+    try:
+        parsed = json.loads(body) if body else {}
+    except ValueError:
+        parsed = {}
+    return r.status if hasattr(r, "status") else r.code, parsed, r
 
 DEVICES = {
     "retention_days": 14,
@@ -60,7 +100,7 @@ def check(name, cond, detail=""):
 
 
 def get_json(path):
-    with urllib.request.urlopen(BASE + path, timeout=10) as r:
+    with _OPENER.open(urllib.request.Request(BASE + path), timeout=10) as r:
         return json.loads(r.read())
 
 
@@ -97,7 +137,10 @@ def main():
 
     env = dict(os.environ, DEVICES_CONFIG=cfg_path, DB_PATH=db_path,
                HTTP_PORT=str(HTTP_PORT), HTTP_BIND="127.0.0.1",
-               PRUNE_INTERVAL_SEC="2", RETENTION_DAYS="14")
+               PRUNE_INTERVAL_SEC="2", RETENTION_DAYS="14",
+               AUTH_DB_PATH=os.path.join(tmp, "auth.db"),
+               AUTH_ENABLED="true", ADMIN_USERNAME=ADMIN_USER,
+               ADMIN_PASSWORD=ADMIN_PASS)
 
     print("== startup ==")
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0
@@ -111,7 +154,8 @@ def main():
     deadline = time.time() + 15
     while time.time() < deadline and proc.poll() is None:
         try:
-            get_json("/api/stats")
+            # /healthz is public — reachable before login.
+            urllib.request.urlopen(BASE + "/healthz", timeout=4).read()
             up = True
             break
         except (urllib.error.URLError, ConnectionError, OSError):
@@ -120,6 +164,46 @@ def main():
     if not up:
         proc.kill()
         sys.exit(1)
+
+    print("== auth gate ==")
+    code, _, _ = request("GET", "/api/stats")
+    check("api requires auth before login (401)", code == 401, str(code))
+    code, _, _ = request("GET", "/api/devices")
+    check("devices requires auth (401)", code == 401, str(code))
+    # index redirects unauthenticated browsers to /login (302, no body leak).
+    noredir = urllib.request.build_opener(_NoRedirect())
+    try:
+        rr = noredir.open(urllib.request.Request(BASE + "/"), timeout=10)
+        icode, iloc = rr.status, rr.headers.get("Location", "")
+    except urllib.error.HTTPError as e:
+        icode, iloc = e.code, e.headers.get("Location", "")
+    check("index redirects to /login when unauthenticated",
+          icode == 302 and iloc == "/login", f"{icode} {iloc}")
+
+    # SQL-injection / auth-bypass attempt in the username must NOT log in.
+    code, _, _ = request("POST", "/api/login",
+                         {"username": "admin' OR '1'='1", "password": "x"})
+    check("sql-injection login attempt rejected (not 200)", code != 200,
+          str(code))
+
+    # Wrong password before the real login.
+    code, _, _ = request("POST", "/api/login",
+                         {"username": ADMIN_USER, "password": "wrong-pass-xx"})
+    check("wrong password -> 401", code == 401, str(code))
+
+    print("== login ==")
+    code, body, _ = request("POST", "/api/login",
+                           {"username": ADMIN_USER, "password": ADMIN_PASS})
+    check("admin login succeeds", code == 200 and body.get("ok"), str(body))
+    _CSRF["token"] = body.get("csrf_token", "")
+    check("login returns csrf token", bool(_CSRF["token"]))
+    check("admin role reported", body.get("user", {}).get("role") == "admin",
+          str(body.get("user")))
+    code, me, _ = request("GET", "/api/me")
+    check("/api/me after login", code == 200
+          and me.get("user", {}).get("username") == ADMIN_USER, str(me))
+    check("admin from ADMIN_PASSWORD is not forced to change pw",
+          me.get("user", {}).get("must_change_pw") is False, str(me))
 
     check("3 devices reported", len(get_json("/api/devices")) == 3)
 
@@ -210,11 +294,7 @@ def main():
     check("port exact filter (=)",
           all(e["dst_port"] == 443 for e in f["events"])
           and len(f["events"]) == 35, str(len(f["events"])))
-    try:
-        urllib.request.urlopen(BASE + "/api/live?since=0&port=44x", timeout=10)
-        code = 200
-    except urllib.error.HTTPError as e:
-        code = e.code
+    code, _, _ = request("GET", "/api/live?since=0&port=44x")
     check("non-numeric port filter -> 400", code == 400, str(code))
     f = get_json("/api/live?since=0&ip=192.168.10.55")
     check("ip filter (src/dst substring)",
@@ -245,21 +325,101 @@ def main():
     check("all 3 devices seen this minute",
           sum(1 for d in st["devices"] if d["events_last_min"] > 0) == 3,
           str({k: v["events_last_min"] for k, v in dmap.items()}))
-    with urllib.request.urlopen(BASE + "/api/events.csv?window=86400",
-                                timeout=10) as r:
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=86400"), timeout=10) as r:
         csv_text = r.read().decode()
         disp = r.headers.get("Content-Disposition", "")
     check("csv export", "attachment" in disp
           and csv_text.startswith("time,device,vendor,")
           and "Drop-RDP" in csv_text, disp)
     for fav in ("/favicon.ico", "/favicon.png"):
-        with urllib.request.urlopen(BASE + fav, timeout=10) as r:
+        with _OPENER.open(urllib.request.Request(BASE + fav), timeout=10) as r:
             body = r.read()
             check(f"favicon at {fav}",
                   r.headers.get("Content-Type") == "image/png"
                   and body.startswith(b"\x89PNG")
                   and "max-age" in r.headers.get("Cache-Control", ""),
                   str(r.headers.get("Content-Type")))
+
+    print("== security headers + csp nonce ==")
+    _, _, r = request("GET", "/api/me")
+    hh = r.headers
+    check("X-Content-Type-Options: nosniff",
+          hh.get("X-Content-Type-Options") == "nosniff")
+    check("X-Frame-Options: DENY", hh.get("X-Frame-Options") == "DENY")
+    check("CSP header present", bool(hh.get("Content-Security-Policy")))
+    with _OPENER.open(urllib.request.Request(BASE + "/"), timeout=10) as ir:
+        html = ir.read().decode()
+        csp = ir.headers.get("Content-Security-Policy", "")
+    check("index CSP uses a script nonce",
+          "script-src 'nonce-" in csp and 'nonce="' in html, csp[:80])
+
+    print("== user management ==")
+    code, body, _ = request("POST", "/api/users",
+                           {"username": "viewer1", "password": "ViewerPass123",
+                            "role": "user"}, csrf=True)
+    check("admin creates a user (201)", code == 201, f"{code} {body}")
+    code, _, _ = request("POST", "/api/users",
+                        {"username": "viewer1", "password": "ViewerPass123"},
+                        csrf=True)
+    check("duplicate username rejected (409)", code == 409, str(code))
+    code, _, _ = request("POST", "/api/users",
+                        {"username": "weakpw", "password": "short"}, csrf=True)
+    check("weak password rejected (400)", code == 400, str(code))
+    code, _, _ = request("POST", "/api/users",
+                        {"username": "nocsrf", "password": "GoodPass12345"},
+                        csrf=False)
+    check("create without CSRF token rejected (403)", code == 403, str(code))
+
+    # A brand-new opener logs in as the non-admin user.
+    cj2 = http.cookiejar.CookieJar()
+    op2 = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cj2))
+
+    def op2_json(path, obj, method="POST", csrf=None):
+        data = json.dumps(obj).encode() if obj is not None else b""
+        req = urllib.request.Request(BASE + path, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if csrf:
+            req.add_header("X-CSRF-Token", csrf)
+        try:
+            resp = op2.open(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            resp = e
+        b = resp.read()
+        return (resp.status if hasattr(resp, "status") else resp.code,
+                json.loads(b) if b else {})
+
+    code, lb = op2_json("/api/login",
+                        {"username": "viewer1", "password": "ViewerPass123"})
+    check("non-admin user can log in", code == 200 and lb.get("ok"), str(lb))
+    v_csrf = lb.get("csrf_token", "")
+    code, _ = op2_json("/api/users",
+                       {"username": "x2", "password": "GoodPass12345"},
+                       csrf=v_csrf)
+    check("non-admin cannot create users (403)", code == 403, str(code))
+
+    print("== rate limiting (5 fails / 15 min) ==")
+    for i in range(5):
+        code, _, _ = request("POST", "/api/login",
+                            {"username": "nobody-x", "password": f"bad{i}"})
+        check(f"failed attempt {i+1} -> 401", code == 401, str(code))
+    code, _, resp = request("POST", "/api/login",
+                          {"username": "nobody-x", "password": "bad-final"})
+    check("6th attempt within window locked out (429)", code == 429, str(code))
+    check("lockout sends Retry-After",
+          bool(resp.headers.get("Retry-After")),
+          str(resp.headers.get("Retry-After")))
+    # Per-username lockout must not lock a different account.
+    code, _, _ = request("GET", "/api/me")
+    check("admin session unaffected by another user's lockout", code == 200,
+          str(code))
+
+    print("== logout ==")
+    code, _ = op2_json("/api/logout", None, csrf=v_csrf)
+    check("logout succeeds (200)", code == 200, str(code))
+    code, _ = op2_json("/api/stats", None, method="GET")
+    check("session invalid after logout (401)", code == 401, str(code))
 
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
