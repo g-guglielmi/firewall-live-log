@@ -151,6 +151,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     <span class="userbar" id="userbar" style="display:none">
       <span class="who" id="who"></span>
       <button class="linkbtn" id="usersBtn" style="display:none">Users</button>
+      <button class="linkbtn" id="emailBtn">Email</button>
       <button class="linkbtn" id="pwBtn">Change password</button>
       <button class="linkbtn" id="logoutBtn">Log out</button>
     </span>
@@ -246,6 +247,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         </select>
       </div>
     </div>
+    <label for="nuEmail">Email (optional — needed for self-service reset)</label>
+    <input id="nuEmail" type="email" maxlength="254" autocomplete="off">
     <label for="nuPass">Password (min 12 characters)</label>
     <input id="nuPass" type="text" maxlength="1024" autocomplete="off">
     <div class="msg" id="usersMsg"></div>
@@ -289,10 +292,21 @@ async function loadMe() {
   if (gone(res)) return;
   const data = await res.json();
   me = data.user; csrfToken = data.csrf_token || "";
-  $("who").innerHTML = `signed in as <b>${esc(me.username)}</b> <span class="tag">${esc(me.role)}</span>`;
+  const emailTag = me.email ? ` <span class="tag">${esc(me.email)}</span>` : "";
+  $("who").innerHTML = `signed in as <b>${esc(me.username)}</b> <span class="tag">${esc(me.role)}</span>${emailTag}`;
   $("usersBtn").style.display = me.role === "admin" ? "" : "none";
   $("userbar").style.display = "";
   if (me.must_change_pw) { openPw(true); }
+}
+async function setMyEmail() {
+  const email = window.prompt("Your email (used for password reset; blank to clear):", me && me.email ? me.email : "");
+  if (email === null) return;
+  const res = await apiSend("POST", "/api/users/set_email",
+    { id: me.id, email: email.trim() });
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) { showError(new Error(data.error || "Could not update email.")); return; }
+  loadMe();
 }
 
 let view = "overview";      // "overview" or a device name
@@ -526,6 +540,7 @@ function openPw(forced) {
   $("pwModal").classList.add("open");
 }
 function closePw() { if (!pwForced) $("pwModal").classList.remove("open"); }
+$("emailBtn").addEventListener("click", setMyEmail);
 $("pwBtn").addEventListener("click", () => openPw(false));
 $("pwCancel").addEventListener("click", closePw);
 $("pwSave").addEventListener("click", async () => {
@@ -545,7 +560,7 @@ $("pwSave").addEventListener("click", async () => {
 
 function openUsers() {
   modalMsg("usersMsg", "");
-  ["nuName","nuPass"].forEach(id => $(id).value = ""); $("nuRole").value = "user";
+  ["nuName","nuPass","nuEmail"].forEach(id => $(id).value = ""); $("nuRole").value = "user";
   $("usersModal").classList.add("open");
   refreshUsers();
 }
@@ -556,11 +571,28 @@ async function refreshUsers() {
   $("userRows").innerHTML = (data.users || []).map(u => `
     <tr><td><b>${esc(u.username)}</b></td>
     <td><span class="tag">${esc(u.role)}</span></td>
+    <td>${u.email ? esc(u.email) : '<span class="sub">no email</span>'}</td>
     <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
-    <td style="text-align:right">${u.id === me.id ? '<span class="sub">you</span>'
-      : `<button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}</td></tr>`).join("");
+    <td style="text-align:right">
+      <button class="linkbtn" data-email="${u.id}" data-cur="${esc(u.email || "")}">Email</button>
+      ${u.id === me.id ? ' <span class="sub">you</span>'
+        : ` · <button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
+    </td></tr>`).join("");
   $("userRows").querySelectorAll("[data-del]").forEach(b =>
     b.addEventListener("click", () => deleteUser(b.dataset.del, b.dataset.name)));
+  $("userRows").querySelectorAll("[data-email]").forEach(b =>
+    b.addEventListener("click", () => editEmail(b.dataset.email, b.dataset.cur)));
+}
+async function editEmail(id, current) {
+  const email = window.prompt("Email address for this user (blank to clear):", current || "");
+  if (email === null) return;
+  const res = await apiSend("POST", "/api/users/set_email",
+    { id: Number(id), email: email.trim() });
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) return modalMsg("usersMsg", data.error || "Could not update email.");
+  modalMsg("usersMsg", "Email updated.", true);
+  refreshUsers();
 }
 async function deleteUser(id, name) {
   if (!window.confirm("Delete user " + name + "?")) return;
@@ -575,10 +607,10 @@ $("usersBtn").addEventListener("click", openUsers);
 $("usersClose").addEventListener("click", () => $("usersModal").classList.remove("open"));
 $("nuCreate").addEventListener("click", async () => {
   const username = $("nuName").value.trim(), password = $("nuPass").value,
-        role = $("nuRole").value;
+        role = $("nuRole").value, email = $("nuEmail").value.trim();
   if (password.length < 12) return modalMsg("usersMsg", "Password must be at least 12 characters.");
   try {
-    const res = await apiSend("POST", "/api/users", { username, password, role });
+    const res = await apiSend("POST", "/api/users", { username, password, role, email });
     if (gone(res)) return;
     const data = await res.json();
     if (!res.ok) return modalMsg("usersMsg", data.error || "Could not create user.");

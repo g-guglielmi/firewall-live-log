@@ -21,6 +21,7 @@ Per-device vendor is auto|unifi|sophos (see devices.json).
 
 import os
 import queue
+import re
 import secrets
 import signal
 import sys
@@ -30,6 +31,7 @@ import time
 import auth as auth_mod
 import config
 import listener
+import mailer as mailer_mod
 import store
 import webserver
 import writer
@@ -67,7 +69,8 @@ def _bootstrap_admin(manager):
     password, supplied = _admin_password()
     try:
         manager.create_user(username, password, role="admin",
-                            must_change_pw=not supplied)
+                            must_change_pw=not supplied,
+                            email=env("ADMIN_EMAIL"))
     except auth_mod.AuthError as e:
         print(f"[auth] could not create default admin: {e}", file=sys.stderr)
         sys.exit(2)
@@ -85,16 +88,19 @@ def _reset_admin(manager):
     forgotten admin password without another account."""
     username = env("ADMIN_USERNAME", "admin")
     password, supplied = _admin_password()
+    admin_email = env("ADMIN_EMAIL")
     existing = manager.get_user_by_name(username)
     try:
         if existing:
             manager.set_password(existing["id"], password,
                                 must_change_pw=not supplied)
             manager.set_role(existing["id"], "admin")
+            if admin_email:
+                manager.set_email(existing["id"], admin_email)
             action = "reset password for admin"
         else:
             manager.create_user(username, password, role="admin",
-                                must_change_pw=not supplied)
+                                must_change_pw=not supplied, email=admin_email)
             action = "created admin"
         manager.clear_lockout(username)
     except auth_mod.AuthError as e:
@@ -107,6 +113,19 @@ def _reset_admin(manager):
     print("[auth] IMPORTANT: unset ADMIN_RESET now, or it re-runs on every "
           "restart.")
     sys.stdout.flush()
+
+
+def normalize_public_url(url):
+    """Return a clean base URL (scheme + host, no trailing slash) for building
+    email links, or None. Accepts a bare FQDN (assumes https)."""
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    if not url:
+        return None
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url
+    return url
 
 
 def setup_auth():
@@ -151,6 +170,16 @@ def main():
     auth_enabled = env_bool("AUTH_ENABLED", True)
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
     auth_manager = setup_auth()
+    mailer = mailer_mod.from_env(env)
+    public_url = normalize_public_url(env("PUBLIC_URL"))
+    if auth_manager is not None:
+        if mailer.configured and public_url:
+            print(f"[mail] password-reset email enabled (links via "
+                  f"{public_url})")
+        elif mailer.configured and not public_url:
+            print("[mail] SMTP configured but PUBLIC_URL is not set — reset "
+                  "links can't be built, so reset email stays off",
+                  file=sys.stderr)
 
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     # Create the schema synchronously so the web server's read-only
@@ -187,7 +216,8 @@ def main():
     httpd = webserver.serve(state, http_bind, http_port,
                             auth_manager=auth_manager,
                             auth_enabled=auth_enabled,
-                            force_secure_cookie=force_secure)
+                            force_secure_cookie=force_secure,
+                            mailer=mailer, public_url=public_url)
     threading.Thread(target=httpd.serve_forever, name="web",
                      daemon=True).start()
 

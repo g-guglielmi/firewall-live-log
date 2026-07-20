@@ -3,21 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in · Firewall Live Log</title>
+<title>Choose a new password · Firewall Live Log</title>
 <link rel="icon" type="image/png" href="/favicon.png">
 <style>
 :root {
   color-scheme: light;
   --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink-2:#52514e;
   --muted:#898781; --border:rgba(11,11,11,0.12); --accent:#2a78d6;
-  --critical:#d03b3b; --tint-bad:rgba(208,59,59,0.08);
+  --good:#0ca30c; --critical:#d03b3b;
+  --tint-good:rgba(12,163,12,0.07); --tint-bad:rgba(208,59,59,0.08);
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
     --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7;
     --muted:#898781; --border:rgba(255,255,255,0.12); --accent:#3987e5;
-    --tint-bad:rgba(230,103,103,0.15);
+    --good:#0ca30c; --critical:#d03b3b;
+    --tint-good:rgba(12,163,12,0.13); --tint-bad:rgba(230,103,103,0.15);
   }
 }
 * { box-sizing:border-box; }
@@ -25,7 +27,7 @@ body { margin:0; background:var(--page); color:var(--ink); min-height:100vh;
   display:flex; align-items:center; justify-content:center; padding:24px;
   font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
 .card { background:var(--surface); border:1px solid var(--border);
-  border-radius:14px; padding:28px 26px; width:100%; max-width:360px; }
+  border-radius:14px; padding:28px 26px; width:100%; max-width:380px; }
 .brand { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
 .brand img { width:34px; height:34px; }
 h1 { font-size:17px; margin:0; font-weight:650; }
@@ -39,61 +41,72 @@ button { width:100%; margin-top:20px; font:inherit; font-weight:600;
   padding:10px 12px; cursor:pointer; }
 button:disabled { opacity:.6; cursor:default; }
 .msg { display:none; margin-top:16px; padding:9px 11px; border-radius:9px;
-  background:var(--tint-bad); border:1px solid var(--critical); font-size:13px; }
-.note { color:var(--muted); font-size:11.5px; margin-top:18px; text-align:center; }
+  font-size:13px; }
+.msg.bad { background:var(--tint-bad); border:1px solid var(--critical); }
+.msg.ok { background:var(--tint-good); border:1px solid var(--good); }
+.links { margin-top:18px; text-align:center; font-size:12.5px; }
+a { color:var(--accent); }
 </style>
 </head>
 <body>
 <div class="card">
   <div class="brand">
     <img src="/favicon.png" alt="">
-    <h1>Firewall Live Log</h1>
+    <h1>Choose a new password</h1>
   </div>
-  <div class="sub">Sign in to view the dashboard.</div>
-  <form id="loginForm" autocomplete="on">
-    <label for="u">Username</label>
-    <input id="u" name="username" type="text" autocomplete="username"
-           autofocus required maxlength="64">
-    <label for="p">Password</label>
-    <input id="p" name="password" type="password"
-           autocomplete="current-password" required maxlength="1024">
-    <button id="submit" type="submit">Sign in</button>
+  <div class="sub">Pick a new password for your account (at least 12
+    characters).</div>
+  <form id="resetForm">
+    <label for="p1">New password</label>
+    <input id="p1" type="password" autocomplete="new-password" required
+           maxlength="1024">
+    <label for="p2">Confirm new password</label>
+    <input id="p2" type="password" autocomplete="new-password" required
+           maxlength="1024">
+    <button id="submit" type="submit">Set new password</button>
     <div class="msg" id="msg"></div>
   </form>
-  <div class="note"><a href="/forgot" style="color:var(--accent)">Forgot your
-    password?</a></div>
+  <div class="links"><a href="/login">← Back to sign in</a></div>
 </div>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const form = $("loginForm"), msg = $("msg"), btn = $("submit");
-function show(text) { msg.textContent = text; msg.style.display = "block"; }
+const form = $("resetForm"), msg = $("msg"), btn = $("submit");
+// The token is read from the URL and only ever sent in the request body —
+// never written into the page, so it can't be reflected as HTML.
+const token = new URLSearchParams(location.search).get("token") || "";
+function show(text, ok) {
+  msg.textContent = text;
+  msg.className = "msg " + (ok ? "ok" : "bad");
+  msg.style.display = "block";
+}
+if (!token) {
+  show("This reset link is missing its token. Request a new one.", false);
+  btn.disabled = true;
+}
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  msg.style.display = "none";
+  const p1 = $("p1").value, p2 = $("p2").value;
+  if (p1.length < 12) return show("Password must be at least 12 characters.", false);
+  if (p1 !== p2) return show("The two passwords do not match.", false);
   btn.disabled = true;
   try {
-    const res = await fetch("/api/login", {
+    const res = await fetch("/api/reset_password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: $("u").value, password: $("p").value })
+      body: JSON.stringify({ token, new_password: p1 })
     });
     let data = {};
     try { data = await res.json(); } catch (_) {}
     if (res.ok) {
-      window.location.replace("/");
-      return;
-    }
-    if (res.status === 429) {
-      const ra = res.headers.get("Retry-After");
-      show((data.error || "Too many attempts.") +
-           (ra ? " Try again in " + Math.ceil(ra / 60) + " min." : ""));
+      show("Password updated. Redirecting to sign in…", true);
+      setTimeout(() => window.location.replace("/login"), 1200);
     } else {
-      show(data.error || "Sign in failed.");
+      show(data.error || "Could not reset the password.", false);
+      btn.disabled = false;
     }
   } catch (err) {
-    show("Network error — please try again.");
-  } finally {
+    show("Network error — please try again.", false);
     btn.disabled = false;
   }
 });

@@ -39,7 +39,20 @@ ATTEMPT_RETENTION_SEC = 24 * 3600    # keep login attempts this long
 MIN_PASSWORD_LEN = 12
 VALID_ROLES = ("admin", "user")
 
+# Self-service password reset (email link) tunables.
+RESET_TTL_SEC = 30 * 60              # a reset link is valid for 30 minutes
+RESET_WINDOW_SEC = 60 * 60           # rate-limit window for reset requests
+RESET_MAX_PER_USER = 5               # ...per account within the window
+RESET_MAX_PER_IP = 20                # ...per source IP within the window
+
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{2,63}$")
+# Deliberately simple: one @, no spaces/control chars (which also blocks
+# header injection), a dot in the domain. Real deliverability is SMTP's job.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Column order here must match AuthManager._row_to_user().
+_USER_SELECT = ("SELECT id, username, pw_hash, role, must_change_pw, "
+                "created_at, email FROM users")
 
 # A fixed hash of a throwaway password. verify_login() runs a PBKDF2 pass
 # against this when the username is unknown, so a missing user and a wrong
@@ -105,6 +118,21 @@ def _validate_password(password):
     return password
 
 
+def _validate_email(email):
+    """Return a cleaned address, or None for an empty value (clears email).
+    Raises AuthError on a malformed address."""
+    if email is None:
+        return None
+    if not isinstance(email, str):
+        raise AuthError("email must be a string")
+    email = email.strip()
+    if email == "":
+        return None
+    if len(email) > 254 or not _EMAIL_RE.match(email):
+        raise AuthError("that doesn't look like a valid email address")
+    return email
+
+
 def _token_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -123,7 +151,8 @@ class AuthManager:
                 pw_hash        TEXT NOT NULL,
                 role           TEXT NOT NULL DEFAULT 'user',
                 must_change_pw INTEGER NOT NULL DEFAULT 0,
-                created_at     INTEGER NOT NULL
+                created_at     INTEGER NOT NULL,
+                email          TEXT
             );
             CREATE TABLE IF NOT EXISTS sessions (
                 token_hash TEXT PRIMARY KEY,
@@ -145,7 +174,24 @@ class AuthManager:
                 ON login_attempts(username, ts);
             CREATE INDEX IF NOT EXISTS idx_attempts_ip_ts
                 ON login_attempts(ip, ts);
+            CREATE TABLE IF NOT EXISTS password_resets (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id    INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used       INTEGER NOT NULL DEFAULT 0,
+                request_ip TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_resets_user
+                ON password_resets(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_resets_ip
+                ON password_resets(request_ip, created_at);
         """)
+        # Migrate older auth.db files (pre-email) in place.
+        cols = [r[1] for r in self.db.execute("PRAGMA table_info(users)")]
+        if "email" not in cols:
+            self.db.execute("ALTER TABLE users ADD COLUMN email TEXT")
         self.db.commit()
         if _DUMMY_HASH is None:
             _DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
@@ -156,9 +202,10 @@ class AuthManager:
             return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
     def create_user(self, username, password, role="user",
-                    must_change_pw=False):
+                    must_change_pw=False, email=None):
         username = _validate_username(username)
         _validate_password(password)
+        email = _validate_email(email)
         if role not in VALID_ROLES:
             raise AuthError(f"role must be one of {list(VALID_ROLES)}")
         pw_hash = hash_password(password)
@@ -166,9 +213,9 @@ class AuthManager:
             try:
                 cur = self.db.execute(
                     "INSERT INTO users (username, pw_hash, role, "
-                    "must_change_pw, created_at) VALUES (?,?,?,?,?)",
+                    "must_change_pw, created_at, email) VALUES (?,?,?,?,?,?)",
                     (username, pw_hash, role, 1 if must_change_pw else 0,
-                     int(time.time())))
+                     int(time.time()), email))
                 self.db.commit()
                 return cur.lastrowid
             except sqlite3.IntegrityError:
@@ -179,31 +226,51 @@ class AuthManager:
             return None
         return {"id": row[0], "username": row[1], "role": row[3],
                 "must_change_pw": bool(row[4]), "created_at": row[5],
-                "_pw_hash": row[2]}
+                "email": row[6], "_pw_hash": row[2]}
 
     def get_user_by_name(self, username):
         with self.lock:
             row = self.db.execute(
-                "SELECT id, username, pw_hash, role, must_change_pw, "
-                "created_at FROM users WHERE username = ? COLLATE NOCASE",
+                _USER_SELECT + " WHERE username = ? COLLATE NOCASE",
                 (username,)).fetchone()
         return self._row_to_user(row)
 
     def get_user_by_id(self, user_id):
         with self.lock:
             row = self.db.execute(
-                "SELECT id, username, pw_hash, role, must_change_pw, "
-                "created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+                _USER_SELECT + " WHERE id = ?", (user_id,)).fetchone()
         return self._row_to_user(row)
+
+    def find_user_for_reset(self, identifier):
+        """Look a user up by username OR email (for the forgot-password
+        flow). Returns the user dict or None."""
+        if not isinstance(identifier, str) or not identifier.strip():
+            return None
+        ident = identifier.strip()
+        with self.lock:
+            row = self.db.execute(
+                _USER_SELECT + " WHERE username = ? COLLATE NOCASE "
+                "OR email = ? COLLATE NOCASE LIMIT 1",
+                (ident, ident)).fetchone()
+        return self._row_to_user(row)
+
+    def set_email(self, user_id, email):
+        email = _validate_email(email)
+        with self.lock:
+            cur = self.db.execute("UPDATE users SET email = ? WHERE id = ?",
+                                  (email, user_id))
+            if cur.rowcount == 0:
+                raise AuthError("user not found", code=404)
+            self.db.commit()
 
     def list_users(self):
         with self.lock:
             rows = self.db.execute(
-                "SELECT id, username, role, must_change_pw, created_at "
+                "SELECT id, username, role, must_change_pw, created_at, email "
                 "FROM users ORDER BY id").fetchall()
         return [{"id": r[0], "username": r[1], "role": r[2],
-                 "must_change_pw": bool(r[3]), "created_at": r[4]}
-                for r in rows]
+                 "must_change_pw": bool(r[3]), "created_at": r[4],
+                 "email": r[5]} for r in rows]
 
     def delete_user(self, user_id):
         with self.lock:
@@ -286,8 +353,7 @@ class AuthManager:
                         max(1, locked_until - now))
 
             row = self.db.execute(
-                "SELECT id, username, pw_hash, role, must_change_pw, "
-                "created_at FROM users WHERE username = ? COLLATE NOCASE",
+                _USER_SELECT + " WHERE username = ? COLLATE NOCASE",
                 (username,)).fetchone()
             user = self._row_to_user(row)
             if user is not None:
@@ -333,9 +399,9 @@ class AuthManager:
         with self.lock:
             row = self.db.execute(
                 "SELECT s.user_id, s.csrf_token, s.expires_at, u.id, "
-                "u.username, u.pw_hash, u.role, u.must_change_pw, "
-                "u.created_at FROM sessions s JOIN users u "
-                "ON u.id = s.user_id WHERE s.token_hash = ?", (th,)).fetchone()
+                "u.username, u.role, u.must_change_pw, u.created_at, u.email "
+                "FROM sessions s JOIN users u ON u.id = s.user_id "
+                "WHERE s.token_hash = ?", (th,)).fetchone()
             if not row:
                 return None
             if row[2] < now:
@@ -343,8 +409,9 @@ class AuthManager:
                                 (th,))
                 self.db.commit()
                 return None
-        user = {"id": row[3], "username": row[4], "role": row[6],
-                "must_change_pw": bool(row[7]), "created_at": row[8]}
+        user = {"id": row[3], "username": row[4], "role": row[5],
+                "must_change_pw": bool(row[6]), "created_at": row[7],
+                "email": row[8]}
         return user, row[1]
 
     def delete_session(self, token):
@@ -364,6 +431,71 @@ class AuthManager:
                 "COLLATE NOCASE AND success = 0", (username,))
             self.db.commit()
 
+    # -- password reset tokens --------------------------------------------
+    def recent_reset_count(self, user_id, ip, window=RESET_WINDOW_SEC):
+        """Return (per_user, per_ip) reset-request counts in the window, for
+        rate limiting."""
+        since = int(time.time()) - window
+        with self.lock:
+            u = self.db.execute(
+                "SELECT COUNT(*) FROM password_resets "
+                "WHERE user_id = ? AND created_at >= ?",
+                (user_id, since)).fetchone()[0]
+            i = self.db.execute(
+                "SELECT COUNT(*) FROM password_resets "
+                "WHERE request_ip = ? AND created_at >= ?",
+                (ip, since)).fetchone()[0]
+        return u, i
+
+    def create_reset_token(self, user_id, ip):
+        """Create a single-use reset token; invalidate the user's prior
+        unused tokens. Returns the raw token (only its hash is stored)."""
+        token = secrets.token_urlsafe(32)
+        now = int(time.time())
+        with self.lock:
+            self.db.execute(
+                "UPDATE password_resets SET used = 1 "
+                "WHERE user_id = ? AND used = 0", (user_id,))
+            self.db.execute(
+                "INSERT INTO password_resets (token_hash, user_id, "
+                "created_at, expires_at, used, request_ip) "
+                "VALUES (?,?,?,?,0,?)",
+                (_token_hash(token), user_id, now, now + RESET_TTL_SEC, ip))
+            self.db.commit()
+        return token
+
+    def reset_password_with_token(self, token, new_password):
+        """Consume a valid reset token and set the new password atomically.
+        Raises AuthError if the token is missing/expired/used or the password
+        fails policy. Revokes the user's sessions and clears their lockout."""
+        if not token or not isinstance(token, str):
+            raise AuthError("this reset link is invalid or has expired", 400)
+        _validate_password(new_password)
+        pw_hash = hash_password(new_password)     # hash before taking the lock
+        th = _token_hash(token)
+        now = int(time.time())
+        with self.lock:
+            row = self.db.execute(
+                "SELECT pr.id, pr.user_id, pr.expires_at, pr.used, u.username "
+                "FROM password_resets pr JOIN users u ON u.id = pr.user_id "
+                "WHERE pr.token_hash = ?", (th,)).fetchone()
+            if not row or row[3] or row[2] < now:
+                raise AuthError("this reset link is invalid or has expired",
+                                400)
+            pr_id, user_id, _exp, _used, username = row
+            self.db.execute(
+                "UPDATE users SET pw_hash = ?, must_change_pw = 0 "
+                "WHERE id = ?", (pw_hash, user_id))
+            self.db.execute("UPDATE password_resets SET used = 1 WHERE id = ?",
+                            (pr_id,))
+            self.db.execute("DELETE FROM sessions WHERE user_id = ?",
+                            (user_id,))
+            self.db.execute(
+                "DELETE FROM login_attempts WHERE username = ? "
+                "COLLATE NOCASE AND success = 0", (username,))
+            self.db.commit()
+        return True
+
     def prune(self):
         now = int(time.time())
         with self.lock:
@@ -371,6 +503,8 @@ class AuthManager:
                             (now,))
             self.db.execute("DELETE FROM login_attempts WHERE ts < ?",
                             (now - ATTEMPT_RETENTION_SEC,))
+            self.db.execute("DELETE FROM password_resets "
+                            "WHERE expires_at < ? OR used = 1", (now,))
             self.db.commit()
 
     def close(self):

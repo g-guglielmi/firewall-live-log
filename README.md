@@ -195,7 +195,16 @@ Editing `devices.json` takes effect on container restart.
 | `ADMIN_USERNAME` | `admin` | Username of the bootstrap admin (first start only). |
 | `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
+| `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
 | `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie (otherwise auto-set when `X-Forwarded-Proto: https` is seen). |
+| `PUBLIC_URL` | _(none)_ | Public base URL of the dashboard (e.g. `https://firewall.example.com`); used to build password-reset links. A bare hostname is assumed `https://`. Required for self-service reset emails. |
+| `SMTP_HOST` | _(none)_ | SMTP server hostname. Setting it enables outbound email. |
+| `SMTP_PORT` | `587` | SMTP port (`587` for STARTTLS, `465` for SSL). |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | _(none)_ | SMTP auth credentials (omit for an unauthenticated relay). |
+| `SMTP_FROM` | _(none)_ | Envelope/`From` address for sent mail. Required to send. |
+| `SMTP_FROM_NAME` | _(none)_ | Optional display name for the `From` header. |
+| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none`. |
+| `MAIL_DEBUG_DIR` | _(none)_ | Dev/testing only: write emails to this directory instead of sending them. |
 
 ## Sizing & retention
 
@@ -274,8 +283,46 @@ Once logged in, the admin can create more accounts from the **Users** panel
 - **admin** — view everything *and* manage users.
 - **user** — view the dashboard only.
 
+Each account can have an **email** attached (set it when creating the user,
+per-row in the Users panel, or via the **Email** button in the top bar for
+your own account). An email is what enables self-service password reset,
+below.
+
 Passwords must be at least 12 characters. The last remaining admin can't be
 deleted or demoted, so you can't lock yourself out.
+
+### Self-service password reset (email)
+
+Users can reset their own password from the **Forgot your password?** link
+on the sign-in page — no admin needed — once two things are configured:
+
+1. An **SMTP server** (so the app can send mail), and
+2. **`PUBLIC_URL`** — the address users reach the dashboard at, used to
+   build the link in the email. The app builds the link from this variable
+   (not the request's `Host` header), so a spoofed host can't turn a reset
+   email into a malicious link.
+
+```sh
+docker run -d --name firewall-live-log --restart unless-stopped \
+  --network host -v /srv/firewall-live-log:/data \
+  -e PUBLIC_URL='https://firewall.example.com' \
+  -e SMTP_HOST='smtp.example.com' -e SMTP_PORT=587 \
+  -e SMTP_USERNAME='firewall-live-log@example.com' \
+  -e SMTP_PASSWORD='…' -e SMTP_FROM='firewall-live-log@example.com' \
+  ghcr.io/g-guglielmi/firewall-live-log:latest
+```
+
+The flow: the user enters their username or email → they always see the same
+"if an account exists, a link has been sent" response (so it can't be used
+to discover who has an account) → if the account exists and has an email, a
+one-time link valid for **30 minutes** is emailed. Opening it lets them set
+a new password, which revokes their existing sessions and clears any
+lockout. Reset requests are rate-limited per account and per source IP, and
+reset tokens are single-use and stored only as hashes.
+
+If SMTP or `PUBLIC_URL` isn't configured, the link simply does nothing (the
+page still shows the same generic message) and admins can always reset a
+user from the Users panel instead.
 
 ### Forgot the admin password?
 

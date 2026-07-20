@@ -21,6 +21,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import auth as auth_mod
+import mailer as mailer_mod
 import store
 
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -105,6 +106,8 @@ class Handler(BaseHTTPRequestHandler):
     auth = None                 # auth.AuthManager, or None when disabled
     auth_enabled = True
     force_secure_cookie = False
+    mailer = None               # mailer.Mailer, or None
+    public_url = None           # e.g. https://firewall.example.com
 
     def log_message(self, *a):
         pass
@@ -248,6 +251,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._serve_html("login.html")
                 return
+            if path == "/forgot":
+                self._serve_html("forgot.html")
+                return
+            if path == "/reset":
+                # The token travels in the query string and is read by the
+                # page's JS; it is never interpolated into the HTML.
+                self._serve_html("reset.html")
+                return
             if path in ("/favicon.ico", "/favicon.png"):
                 with open(os.path.join(_STATIC_DIR, "favicon.png"), "rb") as f:
                     self._send(200, f.read(), "image/png",
@@ -267,9 +278,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_html("index.html")
                 return
             if path == "/api/me":
-                self._json({"user": {k: user[k] for k in
+                self._json({"user": {k: user.get(k) for k in
                                      ("id", "username", "role",
-                                      "must_change_pw")},
+                                      "must_change_pw", "email")},
                             "csrf_token": authed[1]})
                 return
             if path == "/api/users":
@@ -337,6 +348,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/login":
                 self._handle_login()
                 return
+            if path == "/api/forgot_password":
+                self._handle_forgot_password()
+                return
+            if path == "/api/reset_password":
+                self._handle_reset_password()
+                return
 
             authed = self.current_user()
             if not authed:
@@ -360,7 +377,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_create_user(user)
                 return
             if path == "/api/users/reset_password":
-                self._handle_reset_password(user)
+                self._handle_admin_reset_password(user)
+                return
+            if path == "/api/users/set_email":
+                self._handle_set_email(user)
                 return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
@@ -462,10 +482,11 @@ class Handler(BaseHTTPRequestHandler):
         uid = self.auth.create_user(
             body.get("username", ""), body.get("password", ""),
             role=body.get("role", "user"),
-            must_change_pw=bool(body.get("must_change_pw", False)))
+            must_change_pw=bool(body.get("must_change_pw", False)),
+            email=body.get("email"))
         self._json({"ok": True, "id": uid}, 201)
 
-    def _handle_reset_password(self, user):
+    def _handle_admin_reset_password(self, user):
         if user["role"] != "admin":
             self._json({"error": "admin required"}, 403)
             return
@@ -476,6 +497,79 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "id must be an integer"}, 400)
             return
         self.auth.set_password(target, new, must_change_pw=True)
+        self._json({"ok": True})
+
+    def _handle_set_email(self, user):
+        body = self._read_json_body()
+        target = body.get("id")
+        if not isinstance(target, int):
+            self._json({"error": "id must be an integer"}, 400)
+            return
+        # A user may set their own email; only an admin may set another's.
+        if target != user["id"] and user["role"] != "admin":
+            self._json({"error": "admin required"}, 403)
+            return
+        self.auth.set_email(target, body.get("email"))
+        self._json({"ok": True})
+
+    # -- public self-service password reset --------------------------------
+    def _handle_forgot_password(self):
+        # Always answer the same way regardless of whether the account exists
+        # or mail is configured — no account enumeration. Any real work
+        # (lookup, rate-limit, send) happens on a background thread so
+        # response timing can't be used to probe for valid accounts either.
+        try:
+            body = self._read_json_body()
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        identifier = (body.get("username_or_email") or body.get("username")
+                      or body.get("email") or "")
+        ip = self._client_ip()
+        if (self.auth_enabled and self.auth and self.mailer
+                and self.mailer.configured and self.public_url
+                and isinstance(identifier, str) and identifier.strip()):
+            threading.Thread(target=self._process_forgot,
+                             args=(identifier.strip(), ip),
+                             daemon=True).start()
+        elif self.auth_enabled and identifier and not (
+                self.mailer and self.mailer.configured and self.public_url):
+            print("[mail] password-reset requested but email/PUBLIC_URL is "
+                  "not configured — no email sent", flush=True)
+        self._json({"ok": True, "message": "If an account with that username "
+                    "or email exists, a reset link has been sent."})
+
+    def _process_forgot(self, identifier, ip):
+        try:
+            u = self.auth.find_user_for_reset(identifier)
+            if not u or not u.get("email"):
+                return
+            per_user, per_ip = self.auth.recent_reset_count(u["id"], ip)
+            if (per_user >= auth_mod.RESET_MAX_PER_USER
+                    or per_ip >= auth_mod.RESET_MAX_PER_IP):
+                print(f"[mail] reset rate-limited for user id {u['id']}",
+                      flush=True)
+                return
+            token = self.auth.create_reset_token(u["id"], ip)
+            url = f"{self.public_url}/reset?token={token}"
+            self.mailer.send(
+                u["email"], "Reset your firewall-live-log password",
+                mailer_mod.reset_email_body(
+                    u["username"], url, auth_mod.RESET_TTL_SEC // 60))
+        except Exception as e:                     # never crash the thread
+            print(f"[mail] forgot-password processing error: "
+                  f"{type(e).__name__}: {e}", flush=True)
+
+    def _handle_reset_password(self):
+        if not self.auth_enabled or not self.auth:
+            self._json({"error": "authentication is disabled"}, 400)
+            return
+        try:
+            body = self._read_json_body()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid request body"}, 400)
+            return
+        self.auth.reset_password_with_token(
+            body.get("token", ""), body.get("new_password", ""))
         self._json({"ok": True})
 
     def _safe_500(self, e):
@@ -501,13 +595,17 @@ def _to_csv(events):
 
 
 def serve(state, bind, port, auth_manager=None, auth_enabled=True,
-          force_secure_cookie=False):
+          force_secure_cookie=False, mailer=None, public_url=None):
     Handler.state = state
     Handler.auth = auth_manager
     Handler.auth_enabled = auth_enabled
     Handler.force_secure_cookie = force_secure_cookie
+    Handler.mailer = mailer
+    Handler.public_url = public_url
     httpd = ThreadingHTTPServer((bind, port), Handler)
     httpd.daemon_threads = True
     mode = "enabled" if auth_enabled else "DISABLED"
-    print(f"[web] dashboard on http://{bind}:{port} (auth {mode})")
+    reset = "on" if (mailer and mailer.configured and public_url) else "off"
+    print(f"[web] dashboard on http://{bind}:{port} "
+          f"(auth {mode}, email reset {reset})")
     return httpd

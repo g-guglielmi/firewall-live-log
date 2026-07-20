@@ -14,9 +14,11 @@ Runs on Linux/macOS (SIGTERM) and Windows (CTRL_BREAK):
 Exit code 0 = all checks pass.  Loopback only.
 """
 
+import email as emaillib
 import http.cookiejar
 import json
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -140,7 +142,12 @@ def main():
                PRUNE_INTERVAL_SEC="2", RETENTION_DAYS="14",
                AUTH_DB_PATH=os.path.join(tmp, "auth.db"),
                AUTH_ENABLED="true", ADMIN_USERNAME=ADMIN_USER,
-               ADMIN_PASSWORD=ADMIN_PASS)
+               ADMIN_PASSWORD=ADMIN_PASS,
+               MAIL_DEBUG_DIR=os.path.join(tmp, "mail"),
+               PUBLIC_URL="https://fw.example.test")
+    # Don't inherit a real ADMIN_RESET / SMTP host from the caller's shell.
+    for _k in ("ADMIN_RESET", "SMTP_HOST", "SMTP_FROM", "ADMIN_EMAIL"):
+        env.pop(_k, None)
 
     print("== startup ==")
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WIN else 0
@@ -357,7 +364,8 @@ def main():
     print("== user management ==")
     code, body, _ = request("POST", "/api/users",
                            {"username": "viewer1", "password": "ViewerPass123",
-                            "role": "user"}, csrf=True)
+                            "role": "user",
+                            "email": "viewer1@example.test"}, csrf=True)
     check("admin creates a user (201)", code == 201, f"{code} {body}")
     code, _, _ = request("POST", "/api/users",
                         {"username": "viewer1", "password": "ViewerPass123"},
@@ -420,6 +428,84 @@ def main():
     check("logout succeeds (200)", code == 200, str(code))
     code, _ = op2_json("/api/stats", None, method="GET")
     check("session invalid after logout (401)", code == 401, str(code))
+
+    print("== self-service password reset (email link) ==")
+    maildir = os.path.join(tmp, "mail")
+
+    def mail_files():
+        return [os.path.join(maildir, f) for f in os.listdir(maildir)] \
+            if os.path.isdir(maildir) else []
+
+    # Unknown identifier: generic 200 and (after a beat) no email produced.
+    before = len(mail_files())
+    code, body, _ = request("POST", "/api/forgot_password",
+                          {"username_or_email": "nobody@example.test"})
+    check("forgot for unknown -> generic 200", code == 200 and body.get("ok"),
+          str(body))
+    # Real user with an email: generic 200, and an email file appears.
+    code, body, _ = request("POST", "/api/forgot_password",
+                          {"username_or_email": "viewer1@example.test"})
+    check("forgot for real user -> generic 200", code == 200, str(code))
+    token = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        files = mail_files()
+        if len(files) >= before + 1:
+            newest = max(files, key=os.path.getmtime)
+            with open(newest, encoding="utf-8") as f:
+                parsed = emaillib.message_from_file(f)
+            payload = parsed.get_payload(decode=True)     # decode QP/base64
+            text = payload.decode("utf-8") if payload else ""
+            m = re.search(r"/reset\?token=([A-Za-z0-9_\-]+)", text)
+            if m:
+                token = m.group(1)
+                break
+        time.sleep(0.2)
+    check("reset email sent with a token link", token is not None)
+    check("no email leaked for unknown identifier",
+          len(mail_files()) == before + 1, str(len(mail_files())))
+
+    if token:
+        # Password policy still applies through the reset endpoint.
+        code, _, _ = request("POST", "/api/reset_password",
+                            {"token": token, "new_password": "short"})
+        check("reset rejects a weak password (400)", code == 400, str(code))
+        code, body, _ = request("POST", "/api/reset_password",
+                              {"token": token,
+                               "new_password": "Recovered-Viewer-1"})
+        check("reset with valid token (200)", code == 200, str(body))
+        # Token is single-use.
+        code, _, _ = request("POST", "/api/reset_password",
+                            {"token": token,
+                             "new_password": "Another-Pass-1234"})
+        check("reset token is single-use (400)", code == 400, str(code))
+        # New password works; the old one no longer does.
+        cj3 = http.cookiejar.CookieJar()
+        op3 = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(cj3))
+
+        def login_as(opener, pw):
+            data = json.dumps({"username": "viewer1", "password": pw}).encode()
+            req = urllib.request.Request(BASE + "/api/login", data=data,
+                                         method="POST")
+            req.add_header("Content-Type", "application/json")
+            try:
+                r = opener.open(req, timeout=10)
+            except urllib.error.HTTPError as e:
+                r = e
+            r.read()
+            return r.status if hasattr(r, "status") else r.code
+
+        check("login works with the reset password",
+              login_as(op3, "Recovered-Viewer-1") == 200)
+        check("old password rejected after reset",
+              login_as(urllib.request.build_opener(
+                  urllib.request.HTTPCookieProcessor(
+                      http.cookiejar.CookieJar())), "ViewerPass123") == 401)
+    # Bad/garbage token is rejected.
+    code, _, _ = request("POST", "/api/reset_password",
+                        {"token": "not-a-real-token", "new_password": "Whatever-12345"})
+    check("garbage reset token rejected (400)", code == 400, str(code))
 
     print("== admin reset (ADMIN_RESET) ==")
     # Exercise setup_auth()'s bootstrap + reset wiring in-process against a
