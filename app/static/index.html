@@ -111,10 +111,30 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .empty-note { color:var(--muted); padding:18px 4px; }
 
-/* user bar + modal (auth) */
-.userbar { display:inline-flex; align-items:center; gap:10px; font-size:12.5px; }
-.userbar .who { color:var(--ink-2); }
-.userbar .who b { color:var(--ink); font-weight:650; }
+/* user menu (avatar + dropdown) + modal (auth) */
+.usermenu { position:relative; display:inline-block; }
+.avatar-btn { display:inline-flex; align-items:center; gap:3px; background:none;
+  border:0; padding:1px; cursor:pointer; border-radius:999px; }
+.avatar-btn:hover { border:0; }
+.avatar { width:28px; height:28px; border-radius:50%; background:var(--accent);
+  color:#fff; display:inline-flex; align-items:center; justify-content:center;
+  font-weight:650; font-size:13px; text-transform:uppercase; }
+.avatar-btn svg { width:14px; height:14px; color:var(--muted); }
+.menu { position:absolute; right:0; top:calc(100% + 8px); min-width:230px;
+  background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.22); padding:6px; display:none; z-index:60; }
+.menu.open { display:block; }
+.menu-id { padding:9px 11px 6px; }
+.menu-id .nm { font-weight:650; }
+.menu-id .rl { font-size:11px; border:1px solid var(--border); border-radius:999px;
+  padding:1px 8px; color:var(--ink-2); margin-left:6px; }
+.menu-id .em { color:var(--muted); font-size:12px; margin-top:4px; word-break:break-all; }
+.menu-sep { height:1px; background:var(--grid); margin:6px 4px; }
+.menu-item { display:block; width:100%; text-align:left; background:none;
+  border:0; border-radius:8px; padding:8px 11px; font:inherit; color:var(--ink);
+  cursor:pointer; }
+.menu-item:hover { background:var(--page); border:0; }
+.menu-item.danger { color:var(--critical); }
 .linkbtn { background:none; border:0; padding:0; color:var(--accent);
   cursor:pointer; font:inherit; }
 .linkbtn:hover { text-decoration:underline; }
@@ -148,12 +168,25 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     <span class="sub" id="updated">loading…</span>
     <span class="spacer"></span>
     <span class="pill" id="fleetPill"><span class="dot s-nodata"></span> —</span>
-    <span class="userbar" id="userbar" style="display:none">
-      <span class="who" id="who"></span>
-      <button class="linkbtn" id="usersBtn" style="display:none">Users</button>
-      <button class="linkbtn" id="emailBtn">Email</button>
-      <button class="linkbtn" id="pwBtn">Change password</button>
-      <button class="linkbtn" id="logoutBtn">Log out</button>
+    <span class="usermenu" id="userbar" style="display:none">
+      <button class="avatar-btn" id="userMenuBtn" aria-haspopup="true"
+              aria-expanded="false" title="Account">
+        <span class="avatar" id="avatar">?</span>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor"
+          d="M4 6l4 4 4-4z"></path></svg>
+      </button>
+      <div class="menu" id="userMenu" role="menu">
+        <div class="menu-id">
+          <div><span class="nm" id="who"></span></div>
+          <div class="em" id="whoEmail"></div>
+        </div>
+        <div class="menu-sep"></div>
+        <button class="menu-item" id="usersBtn" role="menuitem" style="display:none">Manage users</button>
+        <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
+        <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
+        <div class="menu-sep"></div>
+        <button class="menu-item danger" id="logoutBtn" role="menuitem">Log out</button>
+      </div>
     </span>
   </header>
 
@@ -292,11 +325,19 @@ async function loadMe() {
   if (gone(res)) return;
   const data = await res.json();
   me = data.user; csrfToken = data.csrf_token || "";
-  const emailTag = me.email ? ` <span class="tag">${esc(me.email)}</span>` : "";
-  $("who").innerHTML = `signed in as <b>${esc(me.username)}</b> <span class="tag">${esc(me.role)}</span>${emailTag}`;
+  $("avatar").textContent = (me.username || "?").trim().charAt(0) || "?";
+  $("userMenuBtn").title = me.username;
+  $("who").innerHTML = `${esc(me.username)}<span class="rl">${esc(me.role)}</span>`;
+  $("whoEmail").textContent = me.email || "no email set";
   $("usersBtn").style.display = me.role === "admin" ? "" : "none";
   $("userbar").style.display = "";
   if (me.must_change_pw) { openPw(true); }
+}
+function toggleUserMenu(open) {
+  const m = $("userMenu");
+  const show = open === undefined ? !m.classList.contains("open") : open;
+  m.classList.toggle("open", show);
+  $("userMenuBtn").setAttribute("aria-expanded", show ? "true" : "false");
 }
 async function setMyEmail() {
   const email = window.prompt("Your email (used for password reset; blank to clear):", me && me.email ? me.email : "");
@@ -540,6 +581,16 @@ function openPw(forced) {
   $("pwModal").classList.add("open");
 }
 function closePw() { if (!pwForced) $("pwModal").classList.remove("open"); }
+$("userMenuBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleUserMenu(); });
+// Clicking any menu item runs its action and closes the dropdown.
+$("userMenu").querySelectorAll(".menu-item").forEach(b =>
+  b.addEventListener("click", () => toggleUserMenu(false)));
+document.addEventListener("click", (e) => {
+  if (!$("userbar").contains(e.target)) toggleUserMenu(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") toggleUserMenu(false);
+});
 $("emailBtn").addEventListener("click", setMyEmail);
 $("pwBtn").addEventListener("click", () => openPw(false));
 $("pwCancel").addEventListener("click", closePw);
