@@ -74,9 +74,13 @@ def _stats(state):
         # incrementally-maintained meta; only the current-rate query touches
         # the events table, and it's an indexed range over the last 60 s.
         dev_stats = json.loads(store.meta_get(db, "dev_stats", "{}"))
+        # Force the ts index: left to itself the planner uses idx_events_dev
+        # to skip the GROUP BY sort and then scans the *whole* table to apply
+        # the ts filter (seconds on a multi-GB DB, every stats poll). INDEXED
+        # BY makes it range-scan just the last 60 s and group those few rows.
         recent = {r[0]: r[1] for r in db.execute(
-            "SELECT device, COUNT(*) FROM events WHERE ts >= ? GROUP BY device",
-            (now - 60,))}
+            "SELECT device, COUNT(*) FROM events INDEXED BY idx_events_ts "
+            "WHERE ts >= ? GROUP BY device", (now - 60,))}
         # MIN and MAX in one SELECT can't both use the ts index, so SQLite
         # scans the whole table (seconds on a multi-GB DB, and it blocks the
         # shared read connection). Two scalar subqueries each do an O(log n)
