@@ -77,7 +77,12 @@ def _stats(state):
         recent = {r[0]: r[1] for r in db.execute(
             "SELECT device, COUNT(*) FROM events WHERE ts >= ? GROUP BY device",
             (now - 60,))}
-        span = db.execute("SELECT MIN(ts), MAX(ts) FROM events").fetchone()
+        # MIN and MAX in one SELECT can't both use the ts index, so SQLite
+        # scans the whole table (seconds on a multi-GB DB, and it blocks the
+        # shared read connection). Two scalar subqueries each do an O(log n)
+        # index seek instead.
+        span = db.execute("SELECT (SELECT MIN(ts) FROM events), "
+                          "(SELECT MAX(ts) FROM events)").fetchone()
         unparsed = db.execute("SELECT COUNT(*) FROM unparsed").fetchone()[0]
         devices = []
         for d in state.devices:
