@@ -206,7 +206,9 @@ Editing `devices.json` takes effect on container restart.
 | `SMTP_FROM` | _(none)_ | Envelope/`From` address for sent mail. Required to send. |
 | `SMTP_FROM_NAME` | _(none)_ | Optional display name for the `From` header. |
 | `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none`. |
-| `MAIL_DEBUG_DIR` | _(none)_ | Dev/testing only: write emails to this directory instead of sending them. |
+| `SMTP_TLS_INSECURE` | `false` | Skip TLS certificate verification (still encrypted). For internal relays with an expired/self-signed cert — use only when you understand the MITM trade-off. |
+| `SMTP_DEBUG` | `false` | Log the full SMTP protocol conversation to stderr (for diagnosing send failures). |
+| `MAIL_DEBUG_DIR` | _(none)_ | Dev/testing only: write emails to this directory **instead of** sending them over SMTP. Leave unset in production. |
 
 ## Sizing & retention
 

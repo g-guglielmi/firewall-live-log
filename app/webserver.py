@@ -582,20 +582,32 @@ class Handler(BaseHTTPRequestHandler):
     def _process_forgot(self, identifier, ip):
         try:
             u = self.auth.find_user_for_reset(identifier)
-            if not u or not u.get("email"):
+            if not u:
+                print(f"[mail] reset requested for unknown account "
+                      f"{identifier!r} — nothing sent", flush=True)
+                return
+            if not u.get("email"):
+                print(f"[mail] reset requested for user {u['username']!r} "
+                      f"but no email is on file — nothing sent", flush=True)
                 return
             per_user, per_ip = self.auth.recent_reset_count(u["id"], ip)
             if (per_user >= auth_mod.RESET_MAX_PER_USER
                     or per_ip >= auth_mod.RESET_MAX_PER_IP):
-                print(f"[mail] reset rate-limited for user id {u['id']}",
+                print(f"[mail] reset rate-limited for user {u['username']!r}",
                       flush=True)
                 return
             token = self.auth.create_reset_token(u["id"], ip)
             url = f"{self.public_url}/reset?token={token}"
-            self.mailer.send(
+            ok = self.mailer.send(
                 u["email"], "Reset your firewall-live-log password",
                 mailer_mod.reset_email_body(
                     u["username"], url, auth_mod.RESET_TTL_SEC // 60))
+            if ok:
+                print(f"[mail] reset email sent to {u['email']!r} for user "
+                      f"{u['username']!r}", flush=True)
+            else:
+                print(f"[mail] reset email FAILED to send to {u['email']!r} "
+                      f"(see the [mail] send error above)", flush=True)
         except Exception as e:                     # never crash the thread
             print(f"[mail] forgot-password processing error: "
                   f"{type(e).__name__}: {e}", flush=True)

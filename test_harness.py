@@ -595,6 +595,24 @@ def main():
           am2.get_session(tokc) is None)
     am2.close()
 
+    print("== mailer TLS options ==")
+    import ssl as _ssl
+    import mailer as mailmod
+    ctx_default = mailmod.Mailer(host="h", sender="a@b.c")._context()
+    check("default keeps TLS cert verification on",
+          ctx_default.verify_mode == _ssl.CERT_REQUIRED
+          and ctx_default.check_hostname is True)
+    ctx_insecure = mailmod.Mailer(host="h", sender="a@b.c",
+                                  tls_verify=False)._context()
+    check("tls_verify=False disables cert verification",
+          ctx_insecure.verify_mode == _ssl.CERT_NONE
+          and ctx_insecure.check_hostname is False)
+    env_map = {"SMTP_HOST": "h", "SMTP_FROM": "a@b.c",
+               "SMTP_TLS_INSECURE": "true", "SMTP_DEBUG": "1"}
+    me = mailmod.from_env(lambda k, d=None: env_map.get(k, d))
+    check("from_env parses SMTP_TLS_INSECURE and SMTP_DEBUG",
+          me.tls_verify is False and me.debug is True)
+
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
     # (PRUNE_INTERVAL_SEC=2). A concurrent short-lived writer is fine in WAL.

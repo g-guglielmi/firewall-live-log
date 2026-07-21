@@ -25,7 +25,7 @@ from email.message import EmailMessage
 class Mailer:
     def __init__(self, host=None, port=587, username=None, password=None,
                  sender=None, sender_name=None, security="starttls",
-                 debug_dir=None, timeout=15):
+                 debug_dir=None, timeout=15, tls_verify=True, debug=False):
         self.host = host or None
         try:
             self.port = int(port) if port else 587
@@ -38,6 +38,18 @@ class Mailer:
         self.security = (security or "starttls").lower()
         self.debug_dir = debug_dir or None
         self.timeout = timeout
+        self.tls_verify = tls_verify
+        self.debug = debug
+
+    def _context(self):
+        """TLS context. With verification off, the connection is still
+        encrypted but the server certificate isn't validated (accepts
+        expired/self-signed certs) — a deliberate, opt-in trade-off."""
+        ctx = ssl.create_default_context()
+        if not self.tls_verify:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
 
     @property
     def configured(self):
@@ -73,14 +85,18 @@ class Mailer:
                 return True
             if not (self.host and self.sender):
                 return False
-            ctx = ssl.create_default_context()
+            ctx = self._context()
             if self.security == "ssl":
                 with smtplib.SMTP_SSL(self.host, self.port,
                                       timeout=self.timeout, context=ctx) as s:
+                    if self.debug:
+                        s.set_debuglevel(1)
                     self._auth_and_send(s, msg)
             else:
                 with smtplib.SMTP(self.host, self.port,
                                   timeout=self.timeout) as s:
+                    if self.debug:
+                        s.set_debuglevel(1)
                     s.ehlo()
                     if self.security == "starttls":
                         s.starttls(context=ctx)
@@ -105,6 +121,10 @@ class Mailer:
                          daemon=True).start()
 
 
+def _truthy(v):
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 def from_env(env):
     """Build a Mailer from an ``env(name, default=None)`` accessor."""
     return Mailer(
@@ -115,7 +135,10 @@ def from_env(env):
         sender=env("SMTP_FROM"),
         sender_name=env("SMTP_FROM_NAME"),
         security=env("SMTP_SECURITY", "starttls"),
-        debug_dir=env("MAIL_DEBUG_DIR"))
+        debug_dir=env("MAIL_DEBUG_DIR"),
+        # Verification on by default; only off when explicitly disabled.
+        tls_verify=not _truthy(env("SMTP_TLS_INSECURE", "false")),
+        debug=_truthy(env("SMTP_DEBUG", "false")))
 
 
 def reset_email_body(username, url, ttl_minutes):

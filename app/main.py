@@ -185,6 +185,13 @@ def main():
             print("[mail] SMTP configured but PUBLIC_URL is not set — reset "
                   "links can't be built, so reset email stays off",
                   file=sys.stderr)
+        if mailer.debug_dir:
+            print(f"[mail] MAIL_DEBUG_DIR is set — emails are WRITTEN to "
+                  f"{mailer.debug_dir} and NOT sent via SMTP", file=sys.stderr)
+        if mailer.configured and not mailer.tls_verify:
+            print("[mail] WARNING: SMTP TLS certificate verification is "
+                  "DISABLED (SMTP_TLS_INSECURE) — connection is encrypted but "
+                  "the server certificate is not validated", file=sys.stderr)
 
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     # Create the schema synchronously so the web server's read-only
