@@ -211,28 +211,49 @@ def query_live(db, since, filters, limit):
     return cursor, _rows_to_dicts(rows)
 
 
-def query_window(db, window_secs, filters, limit, before=None):
-    """Historical snapshot: matching events within the last window_secs,
-    newest-first. ``before`` pages backward — only events with id < before,
-    so the client can load successively older batches."""
+def query_range(db, start_ts, end_ts, filters, limit, before=None):
+    """Historical snapshot of matching events with start_ts <= ts (and, when
+    end_ts is not None, ts <= end_ts), newest-first. ``before`` pages backward
+    — only events with id < before, so the client can load successively older
+    batches."""
     clauses, args = _filter_clauses(filters)
-    cutoff = int(time.time()) - int(window_secs)
+    start_ts = int(start_ts)
     clauses.append("ts >= ?")
-    args.append(cutoff)
+    args.append(start_ts)
+    if end_ts is not None:
+        clauses.append("ts <= ?")
+        args.append(int(end_ts))
     if before and before > 0:
         clauses.append("id < ?")
         args.append(before)
     # The ts filter alone doesn't stop the id-ordered scan, so a selective
     # filter would drag it back through the whole device history. Find the
-    # first id at/after the cutoff via the ts index (O(log n)) and add it as
-    # an id floor, bounding the scan to the window. A small margin absorbs
-    # any id/ts skew at the boundary; the ts filter keeps the result exact.
+    # first id at/after the start cutoff via the ts index (O(log n)) and add it
+    # as an id floor, bounding the scan below. A small margin absorbs any
+    # id/ts skew at the boundary; the ts filter keeps the result exact.
     row = db.execute("SELECT id FROM events WHERE ts >= ? ORDER BY ts LIMIT 1",
-                     (cutoff,)).fetchone()
+                     (start_ts,)).fetchone()
     if row:
         clauses.append("id >= ?")
         args.append(row[0] - WINDOW_ID_MARGIN)
+    # A bounded end needs a matching id ceiling: without it the DESC scan starts
+    # at the newest id and drags through everything newer than the range before
+    # reaching it. (An open range — end_ts None — ends at "now", so the newest
+    # id is already in range and no ceiling is needed.)
+    if end_ts is not None:
+        rowc = db.execute("SELECT id FROM events WHERE ts > ? ORDER BY ts LIMIT 1",
+                          (int(end_ts),)).fetchone()
+        if rowc:
+            clauses.append("id <= ?")
+            args.append(rowc[0] + WINDOW_ID_MARGIN)
     where = " WHERE " + " AND ".join(clauses)
     rows = db.execute(f"{_SELECT}{where} ORDER BY id DESC LIMIT ?",
                       args + [limit]).fetchall()
     return _rows_to_dicts(rows)
+
+
+def query_window(db, window_secs, filters, limit, before=None):
+    """Historical snapshot within the last window_secs (up to now), newest
+    first. Thin wrapper over query_range for the fixed presets and CSV export."""
+    return query_range(db, int(time.time()) - int(window_secs), None,
+                       filters, limit, before=before)

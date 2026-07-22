@@ -54,6 +54,30 @@ def _clamp(params, key, default, hi, lo=1):
     return max(lo, min(int(params.get(key, [str(default)])[0]), hi))
 
 
+MAX_RANGE_SEC = 366 * 86400          # widest custom range we'll accept
+
+
+def _range_from(params, default_window):
+    """Resolve the time window for a history query into (start_ts, end_ts).
+
+    Either an explicit custom range (``from``/``to`` as epoch seconds, end
+    optional) or one of the fixed ``window`` presets (seconds-ago up to now,
+    end_ts None). Raises ValueError on bad input so the handler returns 400."""
+    if "from" in params:
+        start = int(params.get("from", ["0"])[0])
+        to = params.get("to", [""])[0].strip()
+        end = int(to) if to else None
+        if start < 0 or (end is not None and end < 0):
+            raise ValueError("from/to must be non-negative epoch seconds")
+        if end is not None and end <= start:
+            raise ValueError("'to' must be later than 'from'")
+        if end is not None and end - start > MAX_RANGE_SEC:
+            raise ValueError("custom range is too wide")
+        return start, end
+    window = _clamp(params, "window", default_window, 30 * 86400, lo=1)
+    return int(time.time()) - window, None
+
+
 def _filters_from(params):
     def one(key):
         v = params.get(key, [""])[0].strip()
@@ -329,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/events":
                 try:
-                    window = _clamp(params, "window", 3600, 30 * 86400, lo=1)
+                    start_ts, end_ts = _range_from(params, 3600)
                     limit = _clamp(params, "limit", 1000, 5000, lo=1)
                     before = int(params.get("before", ["0"])[0])
                     filters = _filters_from(params)
@@ -337,20 +361,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": str(e)}, 400)
                     return
                 events = self.state.query(
-                    lambda db: store.query_window(db, window, filters, limit,
-                                                  before=before))
+                    lambda db: store.query_range(db, start_ts, end_ts, filters,
+                                                 limit, before=before))
                 self._json({"events": events})
                 return
             if path == "/api/events.csv":
                 try:
-                    window = _clamp(params, "window", 86400, 30 * 86400, lo=1)
+                    start_ts, end_ts = _range_from(params, 86400)
                     limit = _clamp(params, "limit", 100000, 500000, lo=1)
                     filters = _filters_from(params)
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
                     return
                 events = self.state.query(
-                    lambda db: store.query_window(db, window, filters, limit))
+                    lambda db: store.query_range(db, start_ts, end_ts, filters,
+                                                 limit))
                 self._send(200, _to_csv(events), "text/csv; charset=utf-8",
                            {"Content-Disposition": 'attachment; filename="'
                             + time.strftime("firewall-log-%Y%m%d-%H%M.csv")

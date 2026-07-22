@@ -365,6 +365,27 @@ def main():
           and len(w2["events"]) == sum(1 for i in ids if i < mid),
           str(len(w2["events"])))
 
+    print("== custom time range ==")
+    now = int(time.time())
+    # Open-ended range (from an hour ago, no 'to') == the last-hour window.
+    c = get_json(f"/api/events?from={now - 3600}&device=UDM-Test")
+    check("custom range (open end) returns recent events",
+          len(c["events"]) == 36
+          and all(e["device"] == "UDM-Test" for e in c["events"]),
+          str(len(c["events"])))
+    # Bounded range that ends before any event exists → empty. Exercises the
+    # id-ceiling that stops the DESC scan dragging through everything newer.
+    c = get_json(f"/api/events?from={now - 90000}&to={now - 86400}&device=UDM-Test")
+    check("custom range ending in the past is empty",
+          len(c["events"]) == 0, str(len(c["events"])))
+    # Bounded range spanning now returns the same set as the open range.
+    c = get_json(f"/api/events?from={now - 3600}&to={now + 120}&device=UDM-Test")
+    check("bounded range spanning now matches open range",
+          len(c["events"]) == 36, str(len(c["events"])))
+    # Validation: 'to' must be later than 'from'.
+    code, _, _ = request("GET", f"/api/events?from={now}&to={now - 10}")
+    check("custom range with to<=from rejected (400)", code == 400, str(code))
+
     print("== incremental cursor ==")
     tail = get_json(f"/api/live?since={live['cursor']}")
     check("no new events after cursor",

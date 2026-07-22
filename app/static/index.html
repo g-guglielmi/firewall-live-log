@@ -95,6 +95,13 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
 .sysbar .title { font-size:16px; font-weight:650; }
 .sysbar label { color:var(--ink-2); font-size:12.5px; display:inline-flex; gap:5px; align-items:center; }
+.rangebar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;
+  padding:9px 12px; background:var(--surface); border:1px solid var(--border); border-radius:10px; }
+.rangebar label { color:var(--ink-2); font-size:12.5px; }
+.rangebar input[type=datetime-local] { font:inherit; font-size:12.5px; color:var(--ink);
+  background:var(--page); border:1px solid var(--border); border-radius:6px; padding:4px 7px; }
+.rangebar .sub { color:var(--muted); font-size:12px; }
+.rangebar .sub.err { color:var(--danger, #e5534b); }
 /* separate (not collapse) so the sticky header keeps its own background and
    bottom border and layers above the scrolling rows instead of letting them
    bleed on top */
@@ -232,6 +239,15 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
       <a class="btn" id="csvLink" href="#">Download CSV</a>
       <span class="sub" id="meta"></span>
     </div>
+    <div class="rangebar" id="rangeBar" style="display:none">
+      <label for="rFrom">From</label>
+      <input type="datetime-local" id="rFrom">
+      <label for="rTo">To</label>
+      <input type="datetime-local" id="rTo">
+      <button class="primary" id="rApply">Apply</button>
+      <button id="rNow" title="Set the end to the current time">now</button>
+      <span class="sub" id="rMsg"></span>
+    </div>
     <div class="table-scroll">
       <table id="log">
         <thead><tr>
@@ -241,6 +257,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
               <option value="3600">Last 1 hour</option>
               <option value="86400">Last 24 hours</option>
               <option value="604800">Last 7 days</option>
+              <option value="custom">Custom range…</option>
             </select>
           </th>
           <th>Source IP<input type="text" class="colf" id="fSrc" placeholder="filter…"
@@ -507,6 +524,27 @@ function rowHtml(e) {
     <td>${esc(e.rule)}</td></tr>`;
 }
 let loading = false, windowHasMore = false, olderInFlight = false;
+let customFrom = 0, customTo = null;   // epoch secs; customTo null = open to now
+function toLocalInput(sec) {
+  const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`
+       + `T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fromLocalInput(v) {
+  if (!v) return NaN;
+  const t = new Date(v).getTime();
+  return Number.isNaN(t) ? NaN : Math.floor(t / 1000);
+}
+// Add window/from/to to a query param set, matching the current Time mode.
+function applyWindow(p) {
+  const m = $("fMode").value;
+  if (m === "custom") {
+    p.set("from", String(customFrom));
+    if (customTo !== null) p.set("to", String(customTo));
+  } else {
+    p.set("window", m === "live" ? "86400" : m);
+  }
+}
 function renderLog() {
   // Live tail keeps only the newest SHOW rows in the DOM; a history window
   // shows everything that's been loaded (bounded by WINDOW_MAX).
@@ -560,7 +598,7 @@ async function pollLive() {
 async function loadWindow() {
   const gen = fetchGen;
   try {
-    const p = filterQuery(); p.set("window", $("fMode").value);
+    const p = filterQuery(); applyWindow(p);
     p.set("limit", String(WINDOW_BATCH));
     const r = await fetch("/api/events?" + p); if (gone(r)) return;
     const res = await r.json();
@@ -581,7 +619,7 @@ async function loadOlder() {
   const gen = fetchGen, btn = $("loadOlderBtn");
   btn.disabled = true; btn.textContent = "Loading…";
   try {
-    const p = filterQuery(); p.set("window", $("fMode").value);
+    const p = filterQuery(); applyWindow(p);
     p.set("limit", String(WINDOW_BATCH));
     p.set("before", String(events[0].id));   // events[0] is the oldest loaded
     const r = await fetch("/api/events?" + p); if (gone(r)) return;
@@ -610,8 +648,7 @@ function refetchSystem() {
   loading = ($("fMode").value !== "live");
   renderLog();   // clear the table now — an empty device gets no later render
   updateLoadMore();
-  const p = filterQuery();
-  p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
+  const p = filterQuery(); applyWindow(p);
   $("csvLink").href = "/api/events.csv?" + p;
   if ($("fMode").value === "live") pollLive(); else loadWindow();
 }
@@ -630,6 +667,7 @@ function go(target) {
     updateSysStatus();
     ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = "");
     $("fAct").value = ""; $("fMode").value = "live"; $("fPause").checked = false;
+    $("rangeBar").style.display = "none";
     refetchSystem();
   } else {
     renderOverview();
@@ -663,9 +701,40 @@ async function loadStats() {
 /* filter + mode listeners (system view) */
 $("fMode").addEventListener("change", () => {
   clearInterval(liveTimer); liveTimer = null;
+  const m = $("fMode").value;
+  if (m === "custom") { showRangeBar(); return; }   // fetch waits for Apply
+  $("rangeBar").style.display = "none";
   refetchSystem();
-  if ($("fMode").value === "live") liveTimer = setInterval(pollLive, 2000);
+  if (m === "live") liveTimer = setInterval(pollLive, 2000);
 });
+function rangeMsg(text, err) {
+  const el = $("rMsg");
+  el.textContent = text || ""; el.className = "sub" + (err ? " err" : "");
+}
+function showRangeBar() {
+  if (!$("rFrom").value) {                    // first open: default to last hour
+    const now = Math.floor(Date.now() / 1000);
+    $("rFrom").value = toLocalInput(now - 3600);
+    $("rTo").value = toLocalInput(now);
+  }
+  rangeMsg("");
+  $("rangeBar").style.display = "flex";
+}
+function applyRange() {
+  const from = fromLocalInput($("rFrom").value);
+  const to = $("rTo").value ? fromLocalInput($("rTo").value) : null;
+  if (Number.isNaN(from)) { rangeMsg("Enter a valid 'From' time.", true); return; }
+  if (to !== null && Number.isNaN(to)) { rangeMsg("Enter a valid 'To' time.", true); return; }
+  if (to !== null && to <= from) { rangeMsg("'To' must be after 'From'.", true); return; }
+  customFrom = from; customTo = to;
+  rangeMsg(to === null ? "From the selected time to now." : "");
+  refetchSystem();
+}
+$("rApply").addEventListener("click", applyRange);
+$("rNow").addEventListener("click",
+  () => { $("rTo").value = toLocalInput(Math.floor(Date.now() / 1000)); });
+["rFrom", "rTo"].forEach(id => $(id).addEventListener("keydown",
+  e => { if (e.key === "Enter") applyRange(); }));
 ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refetchSystem, 350)));
 $("fAct").addEventListener("change", refetchSystem);
 $("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLive(); });
