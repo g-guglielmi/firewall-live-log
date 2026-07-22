@@ -252,7 +252,9 @@ else.
 In the dashboard these appear as per-column filter boxes under each log
 column (separate **Source IP** / **Destination IP**, plus **Proto**,
 **Port**, **Action**, and **Rule**); the **Time** column header switches
-between live tail and a historical window.
+between live tail and a historical window. Both live and window queries are
+bounded so they stay fast regardless of database size, and the window view
+shows a *querying…* indicator while it loads.
 
 When **live** tailing with a filter, the initial backfill only looks at
 recent activity (the most recent events), then follows new matches as they

@@ -346,6 +346,16 @@ def main():
           all(e["device"] == "UDM-Test" for e in f["events"])
           and len(f["events"]) == 36, str(len(f["events"])))
 
+    print("== window query (filtered, id-bounded) ==")
+    w = get_json("/api/events?window=86400&device=Sophos-Test&action=blocked")
+    check("window query with filter",
+          all(e["action"] in ("Block", "Drop", "Reject") for e in w["events"])
+          and len(w["events"]) == 10, str(len(w["events"])))
+    w = get_json("/api/events?window=86400&device=UDM-Test&proto=%21ICMP")
+    check("window query with negation",
+          all(e["proto"] != "ICMP" for e in w["events"])
+          and len(w["events"]) == 33, str(len(w["events"])))
+
     print("== incremental cursor ==")
     tail = get_json(f"/api/live?since={live['cursor']}")
     check("no new events after cursor",

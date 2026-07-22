@@ -169,6 +169,9 @@ _SELECT = ("SELECT id, ts, device, vendor, src, dst, proto, dst_port, "
 # LIVE_SCAN_CAP events; the incremental polls that follow (id > cursor) are
 # naturally bounded. Historical searches use the window API instead.
 LIVE_SCAN_CAP = 1_000_000
+# Small id cushion when converting a window's time cutoff to an id floor, so
+# any minor id/ts ordering skew at the boundary can't drop edge events.
+WINDOW_ID_MARGIN = 10_000
 _SCANNING_FILTERS = ("vendor", "ip", "src", "dst", "rule", "proto",
                      "port", "action")
 
@@ -212,8 +215,19 @@ def query_window(db, window_secs, filters, limit):
     """Historical snapshot: matching events within the last window_secs,
     newest-first."""
     clauses, args = _filter_clauses(filters)
+    cutoff = int(time.time()) - int(window_secs)
     clauses.append("ts >= ?")
-    args.append(int(time.time()) - int(window_secs))
+    args.append(cutoff)
+    # The ts filter alone doesn't stop the id-ordered scan, so a selective
+    # filter would drag it back through the whole device history. Find the
+    # first id at/after the cutoff via the ts index (O(log n)) and add it as
+    # an id floor, bounding the scan to the window. A small margin absorbs
+    # any id/ts skew at the boundary; the ts filter keeps the result exact.
+    row = db.execute("SELECT id FROM events WHERE ts >= ? ORDER BY ts LIMIT 1",
+                     (cutoff,)).fetchone()
+    if row:
+        clauses.append("id >= ?")
+        args.append(row[0] - WINDOW_ID_MARGIN)
     where = " WHERE " + " AND ".join(clauses)
     rows = db.execute(f"{_SELECT}{where} ORDER BY id DESC LIMIT ?",
                       args + [limit]).fetchall()

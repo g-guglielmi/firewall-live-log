@@ -491,12 +491,15 @@ function rowHtml(e) {
     <td><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
     <td>${esc(e.rule)}</td></tr>`;
 }
+let loading = false;
 function renderLog() {
   const shown = events.slice(-SHOW).reverse();
-  $("meta").textContent = `${shown.length} shown / ${events.length} loaded`;
+  $("meta").textContent = loading ? "querying…"
+    : `${shown.length} shown / ${events.length} loaded`;
   const body = $("log").querySelector("tbody");
   body.innerHTML = shown.length ? shown.map(rowHtml).join("")
-    : `<tr><td colspan="7" class="empty-note">No matching events yet.</td></tr>`;
+    : `<tr><td colspan="7" class="empty-note">${loading
+        ? "Querying the database…" : "No matching events yet."}</td></tr>`;
 }
 let liveInFlight = false;
 async function pollLive() {
@@ -532,9 +535,10 @@ async function loadWindow() {
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     events = res.events.slice().reverse();
+    loading = false;
     renderLog();
     $("banner").style.display = "none";
-  } catch (e) { showError(e); }
+  } catch (e) { loading = false; renderLog(); showError(e); }
 }
 function refetchSystem() {
   fetchGen++;                // any in-flight poll discards its result (gen)
@@ -542,6 +546,9 @@ function refetchSystem() {
                              // user-driven refetch runs immediately (the slot
                              // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
+  // Historical-window queries can take a moment on a big DB — show a
+  // "querying…" state instead of a misleading "no events" while it runs.
+  loading = ($("fMode").value !== "live");
   renderLog();   // clear the table now — an empty device gets no later render
   const p = filterQuery();
   p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
