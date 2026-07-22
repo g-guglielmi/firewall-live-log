@@ -331,12 +331,14 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     window = _clamp(params, "window", 3600, 30 * 86400, lo=1)
                     limit = _clamp(params, "limit", 1000, 5000, lo=1)
+                    before = int(params.get("before", ["0"])[0])
                     filters = _filters_from(params)
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
                     return
                 events = self.state.query(
-                    lambda db: store.query_window(db, window, filters, limit))
+                    lambda db: store.query_window(db, window, filters, limit,
+                                                  before=before))
                 self._json({"events": events})
                 return
             if path == "/api/events.csv":

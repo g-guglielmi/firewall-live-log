@@ -355,6 +355,15 @@ def main():
     check("window query with negation",
           all(e["proto"] != "ICMP" for e in w["events"])
           and len(w["events"]) == 33, str(len(w["events"])))
+    # Backward paging: before=<id> returns only older events.
+    w = get_json("/api/events?window=86400&device=UDM-Test")
+    ids = sorted(e["id"] for e in w["events"])
+    mid = ids[len(ids) // 2]
+    w2 = get_json(f"/api/events?window=86400&device=UDM-Test&before={mid}")
+    check("window before-cursor pages older",
+          all(e["id"] < mid for e in w2["events"])
+          and len(w2["events"]) == sum(1 for i in ids if i < mid),
+          str(len(w2["events"])))
 
     print("== incremental cursor ==")
     tail = get_json(f"/api/live?since={live['cursor']}")

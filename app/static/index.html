@@ -118,6 +118,9 @@ tbody tr.ev-block td { background:var(--tint-bad); }
 tbody tr.ev-nat td { background:var(--tint-nat); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
 .empty-note { color:var(--muted); padding:18px 4px; }
+.loadmore { display:none; align-items:center; justify-content:center; gap:10px;
+  margin-top:10px; }
+.loadmore .sub { color:var(--muted); font-size:12px; }
 
 /* user menu (avatar + dropdown) + modal (auth) */
 .usermenu { position:relative; display:inline-block; }
@@ -255,6 +258,10 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         <tbody></tbody>
       </table>
     </div>
+    <div class="loadmore" id="loadMoreBar">
+      <button id="loadOlderBtn">Load older</button>
+      <span class="sub" id="loadMoreNote"></span>
+    </div>
   </div>
 </div>
 
@@ -317,6 +324,7 @@ const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
 const VENDOR_LABEL = { unifi:"UniFi", sophos:"Sophos", auto:"auto" };
 const BLOCKED = new Set(["Block","Drop","Reject"]);
 const KEEP = 3000, SHOW = 600;
+const WINDOW_BATCH = 2000, WINDOW_MAX = 10000;  // per-page / on-screen caps for history
 const RECV_SECS = 120, QUIET_SECS = 900;   // status thresholds
 
 const $ = id => document.getElementById(id);
@@ -491,15 +499,31 @@ function rowHtml(e) {
     <td><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
     <td>${esc(e.rule)}</td></tr>`;
 }
-let loading = false;
+let loading = false, windowHasMore = false, olderInFlight = false;
 function renderLog() {
-  const shown = events.slice(-SHOW).reverse();
+  // Live tail keeps only the newest SHOW rows in the DOM; a history window
+  // shows everything that's been loaded (bounded by WINDOW_MAX).
+  const isLive = $("fMode").value === "live";
+  const shown = isLive ? events.slice(-SHOW).reverse() : events.slice().reverse();
   $("meta").textContent = loading ? "querying…"
     : `${shown.length} shown / ${events.length} loaded`;
   const body = $("log").querySelector("tbody");
   body.innerHTML = shown.length ? shown.map(rowHtml).join("")
     : `<tr><td colspan="7" class="empty-note">${loading
         ? "Querying the database…" : "No matching events yet."}</td></tr>`;
+}
+function updateLoadMore() {
+  const bar = $("loadMoreBar"), btn = $("loadOlderBtn"), note = $("loadMoreNote");
+  if ($("fMode").value === "live") { bar.style.display = "none"; return; }
+  if (events.length >= WINDOW_MAX) {           // hit the on-screen cap
+    bar.style.display = "flex"; btn.style.display = "none";
+    note.textContent = `Showing the most recent ${WINDOW_MAX.toLocaleString()} — `
+      + `narrow the filter or Download CSV for the full window.`;
+  } else if (windowHasMore) {                   // more older events exist
+    bar.style.display = "flex"; btn.style.display = ""; note.textContent = "";
+  } else {
+    bar.style.display = "none";
+  }
 }
 let liveInFlight = false;
 async function pollLive() {
@@ -529,16 +553,43 @@ async function pollLive() {
 async function loadWindow() {
   const gen = fetchGen;
   try {
-    const p = filterQuery(); p.set("window", $("fMode").value); p.set("limit", "2000");
+    const p = filterQuery(); p.set("window", $("fMode").value);
+    p.set("limit", String(WINDOW_BATCH));
     const r = await fetch("/api/events?" + p); if (gone(r)) return;
     const res = await r.json();
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
-    events = res.events.slice().reverse();
+    events = res.events.slice().reverse();   // oldest-first
+    windowHasMore = res.events.length >= WINDOW_BATCH;
     loading = false;
     renderLog();
+    updateLoadMore();
     $("banner").style.display = "none";
   } catch (e) { loading = false; renderLog(); showError(e); }
+}
+async function loadOlder() {
+  if (olderInFlight || !windowHasMore || $("fMode").value === "live"
+      || !events.length) return;
+  olderInFlight = true;
+  const gen = fetchGen, btn = $("loadOlderBtn");
+  btn.disabled = true; btn.textContent = "Loading…";
+  try {
+    const p = filterQuery(); p.set("window", $("fMode").value);
+    p.set("limit", String(WINDOW_BATCH));
+    p.set("before", String(events[0].id));   // events[0] is the oldest loaded
+    const r = await fetch("/api/events?" + p); if (gone(r)) return;
+    const res = await r.json();
+    if (gen !== fetchGen) return;
+    if (res.error) throw new Error(res.error);
+    events = res.events.slice().reverse().concat(events);   // prepend older
+    windowHasMore = res.events.length >= WINDOW_BATCH;
+    renderLog();
+    updateLoadMore();
+  } catch (e) { showError(e); }
+  finally {
+    olderInFlight = false;
+    btn.disabled = false; btn.textContent = "Load older";
+  }
 }
 function refetchSystem() {
   fetchGen++;                // any in-flight poll discards its result (gen)
@@ -546,10 +597,12 @@ function refetchSystem() {
                              // user-driven refetch runs immediately (the slot
                              // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
+  windowHasMore = false;
   // Historical-window queries can take a moment on a big DB — show a
   // "querying…" state instead of a misleading "no events" while it runs.
   loading = ($("fMode").value !== "live");
   renderLog();   // clear the table now — an empty device gets no later render
+  updateLoadMore();
   const p = filterQuery();
   p.set("window", $("fMode").value === "live" ? "86400" : $("fMode").value);
   $("csvLink").href = "/api/events.csv?" + p;
@@ -612,6 +665,7 @@ $("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLiv
 $("fClear").addEventListener("click", () => {
   ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refetchSystem();
 });
+$("loadOlderBtn").addEventListener("click", loadOlder);
 $("backBtn").addEventListener("click", () => go("overview"));
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 

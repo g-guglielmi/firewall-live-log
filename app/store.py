@@ -211,13 +211,17 @@ def query_live(db, since, filters, limit):
     return cursor, _rows_to_dicts(rows)
 
 
-def query_window(db, window_secs, filters, limit):
+def query_window(db, window_secs, filters, limit, before=None):
     """Historical snapshot: matching events within the last window_secs,
-    newest-first."""
+    newest-first. ``before`` pages backward — only events with id < before,
+    so the client can load successively older batches."""
     clauses, args = _filter_clauses(filters)
     cutoff = int(time.time()) - int(window_secs)
     clauses.append("ts >= ?")
     args.append(cutoff)
+    if before and before > 0:
+        clauses.append("id < ?")
+        args.append(before)
     # The ts filter alone doesn't stop the id-ordered scan, so a selective
     # filter would drag it back through the whole device history. Find the
     # first id at/after the cutoff via the ts index (O(log n)) and add it as

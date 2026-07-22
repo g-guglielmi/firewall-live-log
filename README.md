@@ -254,7 +254,9 @@ column (separate **Source IP** / **Destination IP**, plus **Proto**,
 **Port**, **Action**, and **Rule**); the **Time** column header switches
 between live tail and a historical window. Both live and window queries are
 bounded so they stay fast regardless of database size, and the window view
-shows a *querying…* indicator while it loads.
+shows a *querying…* indicator while it loads. A history window shows the
+newest matches first with a **Load older** button to page further back;
+for the *complete* filtered window, use **Download CSV** (uncapped).
 
 When **live** tailing with a filter, the initial backfill only looks at
 recent activity (the most recent events), then follows new matches as they
