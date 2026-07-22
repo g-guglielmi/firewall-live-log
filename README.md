@@ -241,6 +241,12 @@ shows lines that didn't match a parser.
 a prefix (`44` finds 443 and 445) — prefix it with `=` for an exact
 match (`=80` excludes 8080).
 
+When **live** tailing with a filter, the initial backfill only looks at
+recent activity (the most recent events), then follows new matches as they
+arrive — so a selective filter stays fast on a large database. To search
+filtered *history*, pick a time window (Last 1 hour / 24 hours / 7 days),
+which scans the whole retained window.
+
 ## Testing
 
 ```sh

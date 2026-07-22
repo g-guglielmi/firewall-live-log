@@ -480,8 +480,13 @@ function renderLog() {
   body.innerHTML = shown.length ? shown.map(rowHtml).join("")
     : `<tr><td colspan="7" class="empty-note">No matching events yet.</td></tr>`;
 }
+let liveInFlight = false;
 async function pollLive() {
   if (view === "overview" || $("fMode").value !== "live" || $("fPause").checked) return;
+  // Single-flight: never let the 2s timer stack a second request on top of
+  // one that hasn't returned, or slow polls would pile up on the server.
+  if (liveInFlight) return;
+  liveInFlight = true;
   const gen = fetchGen;
   try {
     const p = filterQuery(); p.set("since", cursor);
@@ -498,6 +503,7 @@ async function pollLive() {
     }
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
+  finally { liveInFlight = false; }
 }
 async function loadWindow() {
   const gen = fetchGen;
@@ -513,7 +519,10 @@ async function loadWindow() {
   } catch (e) { showError(e); }
 }
 function refetchSystem() {
-  fetchGen++;
+  fetchGen++;                // any in-flight poll discards its result (gen)
+  liveInFlight = false;      // ...and release the single-flight slot so this
+                             // user-driven refetch runs immediately (the slot
+                             // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
   renderLog();   // clear the table now — an empty device gets no later render
   const p = filterQuery();

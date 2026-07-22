@@ -143,6 +143,15 @@ def _rows_to_dicts(rows):
 _SELECT = ("SELECT id, ts, device, vendor, src, dst, proto, dst_port, "
            "action, rule FROM events")
 
+# The ip/port/action/vendor filters are substring/equality matches that no
+# index can serve, so on the very first live poll (since<=0) they would scan
+# the whole device history. For a *live* view we only care about current
+# activity, so we bound that initial backfill to the most recent
+# LIVE_SCAN_CAP events; the incremental polls that follow (id > cursor) are
+# naturally bounded. Historical searches use the window API instead.
+LIVE_SCAN_CAP = 1_000_000
+_SCANNING_FILTERS = ("vendor", "ip", "port", "action")
+
 
 def query_live(db, since, filters, limit):
     """Incremental tail: events with id > since (or the most recent when
@@ -156,6 +165,13 @@ def query_live(db, since, filters, limit):
                           args + [limit]).fetchall()
         cursor = rows[-1][0] if rows else since
     else:
+        # Bound the initial backfill when a non-indexable filter is present,
+        # so a selective filter can't trigger a full-history scan.
+        if any(filters.get(k) for k in _SCANNING_FILTERS):
+            maxid = db.execute(
+                "SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
+            clauses.append("id > ?")
+            args.append(maxid - LIVE_SCAN_CAP)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = db.execute(f"{_SELECT}{where} ORDER BY id DESC LIMIT ?",
                           args + [limit]).fetchall()

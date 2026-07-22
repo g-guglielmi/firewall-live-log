@@ -613,6 +613,33 @@ def main():
     check("from_env parses SMTP_TLS_INSECURE and SMTP_DEBUG",
           me.tls_verify is False and me.debug is True)
 
+    print("== live filter scan bound ==")
+    import store as storemod
+    bdb = os.path.join(tmp, "bound.db")
+    wb = storemod.open_writer(bdb)
+    # 30 events for device D; src is unique per row (10.1.<id>.0).
+    storemod.insert_events(wb, [
+        (1700000000 + i, "D", "unifi", f"10.1.{i}.0", "9.9.9.9", "TCP", 443,
+         "Allow", "r") for i in range(1, 31)])
+    wb.commit()
+    rb = storemod.open_reader(bdb)
+    saved_cap = storemod.LIVE_SCAN_CAP
+    try:
+        storemod.LIVE_SCAN_CAP = 5          # only the last ~5 ids in scope
+        _, res = storemod.query_live(rb, 0, {"device": "D", "ip": "10.1.3."}, 500)
+        check("old filtered match beyond live scan cap is skipped", res == [],
+              str(res))
+        _, res_dev = storemod.query_live(rb, 0, {"device": "D"}, 500)
+        check("device-only live view is NOT scan-bounded",
+              len(res_dev) == 30, str(len(res_dev)))
+        storemod.LIVE_SCAN_CAP = 10_000
+        _, res2 = storemod.query_live(rb, 0, {"device": "D", "ip": "10.1.3."}, 500)
+        check("filtered match within scan cap is returned",
+              len(res2) == 1 and res2[0]["src"] == "10.1.3.0", str(res2))
+    finally:
+        storemod.LIVE_SCAN_CAP = saved_cap
+        rb.close(); wb.close()
+
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
     # (PRUNE_INTERVAL_SEC=2). A concurrent short-lived writer is fine in WAL.
