@@ -117,25 +117,33 @@ def _filter_clauses(f):
         clauses.append("(src LIKE ? OR dst LIKE ?)")
         like = f"%{f['ip']}%"
         args += [like, like]
-    if f.get("src"):
-        clauses.append("src LIKE ?")
-        args.append(f"%{f['src']}%")
-    if f.get("dst"):
-        clauses.append("dst LIKE ?")
-        args.append(f"%{f['dst']}%")
-    if f.get("rule"):
-        clauses.append("rule LIKE ?")
-        args.append(f"%{f['rule']}%")
+    # src/dst/rule/proto are substring matches; a leading "!" negates
+    # (exclude matching rows) so noise can be filtered out.
+    for key, col in (("src", "src"), ("dst", "dst"), ("rule", "rule"),
+                     ("proto", "proto")):
+        val = f.get(key)
+        if val:
+            if str(val).startswith("!"):
+                clauses.append(f"{col} NOT LIKE ?")
+                args.append(f"%{str(val)[1:]}%")
+            else:
+                clauses.append(f"{col} LIKE ?")
+                args.append(f"%{val}%")
     if f.get("port"):
         # Prefix match so the result narrows as the user types ("44"
-        # matches 443 and 445), mirroring the substring IP filter.  A
-        # leading "=" forces an exact match ("=80" excludes 8080).
+        # matches 443 and 445).  "=" forces an exact match ("=80" excludes
+        # 8080); a leading "!" negates ("!137" hides port 137, "!=80" hides
+        # exactly 80).
         port = str(f["port"])
+        neg = port.startswith("!")
+        if neg:
+            port = port[1:]
         if port.startswith("="):
-            clauses.append("dst_port = ?")
+            clauses.append("dst_port != ?" if neg else "dst_port = ?")
             args.append(int(port[1:]))
         else:
-            clauses.append("CAST(dst_port AS TEXT) LIKE ?")
+            clauses.append("CAST(dst_port AS TEXT) NOT LIKE ?" if neg
+                           else "CAST(dst_port AS TEXT) LIKE ?")
             args.append(port + "%")
     action = f.get("action")
     if action == "blocked":
@@ -161,7 +169,8 @@ _SELECT = ("SELECT id, ts, device, vendor, src, dst, proto, dst_port, "
 # LIVE_SCAN_CAP events; the incremental polls that follow (id > cursor) are
 # naturally bounded. Historical searches use the window API instead.
 LIVE_SCAN_CAP = 1_000_000
-_SCANNING_FILTERS = ("vendor", "ip", "src", "dst", "rule", "port", "action")
+_SCANNING_FILTERS = ("vendor", "ip", "src", "dst", "rule", "proto",
+                     "port", "action")
 
 
 def query_live(db, since, filters, limit):

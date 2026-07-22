@@ -59,13 +59,19 @@ def _filters_from(params):
         v = params.get(key, [""])[0].strip()
         return v or None
     port = one("port")
-    if port is not None and not (port[1:] if port.startswith("=")
-                                 else port).isdigit():
-        raise ValueError("port filter must be numeric "
-                         "(optionally prefixed with = for exact match)")
+    if port is not None:
+        # Strip optional "!" (negate) then "=" (exact) before the digit check.
+        p = port[1:] if port.startswith("!") else port
+        p = p[1:] if p.startswith("=") else p
+        if p == "":
+            port = None                      # just a sigil so far — no filter
+        elif not p.isdigit():
+            raise ValueError("port filter must be numeric (optionally ! to "
+                             "exclude, = for an exact match)")
     return {"device": one("device"), "vendor": one("vendor"),
             "ip": one("ip"), "src": one("src"), "dst": one("dst"),
-            "rule": one("rule"), "port": port, "action": one("action")}
+            "rule": one("rule"), "proto": one("proto"), "port": port,
+            "action": one("action")}
 
 
 def _stats(state):

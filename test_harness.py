@@ -322,6 +322,25 @@ def main():
     check("rule filter (substring)",
           all(e["rule"] == "Drop-RDP" for e in f["events"])
           and len(f["events"]) == 6, str(len(f["events"])))
+    f = get_json("/api/live?since=0&proto=ICMP")
+    check("proto filter",
+          all(e["proto"] == "ICMP" for e in f["events"])
+          and len(f["events"]) == 7, str(len(f["events"])))
+    # Negation: "!" excludes matches. 7 events are ICMP out of 63.
+    f = get_json("/api/live?since=0&proto=!ICMP")
+    check("proto negation (!) excludes matches",
+          all(e["proto"] != "ICMP" for e in f["events"])
+          and len(f["events"]) == 56, str(len(f["events"])))
+    # Port negation: 6 events are dst_port 3389; excluding leaves 57.
+    f = get_json("/api/live?since=0&port=%213389")   # "!3389"
+    check("port negation (!) excludes a port",
+          all(e["dst_port"] != 3389 for e in f["events"])
+          and len(f["events"]) == 57, str(len(f["events"])))
+    # dst negation: exclude a destination to filter out its noise.
+    f = get_json("/api/live?since=0&dst=%2110.9.9.9")   # "!10.9.9.9"
+    check("dst negation (!) excludes a destination",
+          all("10.9.9.9" not in e["dst"] for e in f["events"])
+          and len(f["events"]) == 57, str(len(f["events"])))
     f = get_json("/api/live?since=0&device=UDM-Test")
     check("device filter",
           all(e["device"] == "UDM-Test" for e in f["events"])
