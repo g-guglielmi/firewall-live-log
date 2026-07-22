@@ -92,16 +92,20 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sys-card .big { font-size:20px; font-weight:650; }
 
 /* system live view */
-.sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:8px; }
+.sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
 .sysbar .title { font-size:16px; font-weight:650; }
-.filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0 10px; }
-.filters select,.filters input[type=text] { font:inherit; color:var(--ink);
-  background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:5px 8px; }
-.filters label { color:var(--ink-2); font-size:12.5px; display:flex; gap:5px; align-items:center; }
+.sysbar label { color:var(--ink-2); font-size:12.5px; display:inline-flex; gap:5px; align-items:center; }
 table { border-collapse:collapse; width:100%; font-size:13px; }
 th,td { text-align:left; padding:5px 9px; border-bottom:1px solid var(--grid); vertical-align:top; }
 th { color:var(--ink-2); font-weight:600; font-size:12px; white-space:nowrap;
   position:sticky; top:0; background:var(--surface); }
+/* per-column filter controls that live inside the header cells */
+.colf { display:block; width:100%; margin-top:5px; font:inherit; font-size:12px;
+  font-weight:400; color:var(--ink); background:var(--page);
+  border:1px solid var(--border); border-radius:6px; padding:3px 6px; }
+.colf:focus { outline:2px solid var(--accent); outline-offset:0; border-color:transparent; }
+th.num .colf { text-align:right; }
+#fSrc, #fDst, #fRule { min-width:120px; }
 td.mono,td.ip,td.port { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace; font-size:12.5px; }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .table-scroll { overflow-x:auto; max-height:68vh; overflow-y:auto; }
@@ -208,33 +212,37 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
       <span class="title" id="sysTitle"></span>
       <span class="pill" id="sysStatus"></span>
       <span class="sub" id="sysMeta"></span>
-    </div>
-    <div class="filters">
-      <select id="fMode" title="Live tail, or a historical window from the retained data">
-        <option value="live">● Live</option>
-        <option value="3600">Last 1 hour</option>
-        <option value="86400">Last 24 hours</option>
-        <option value="604800">Last 7 days</option>
-      </select>
-      <input type="text" id="fIp" placeholder="IP (src or dst)…" size="18">
-      <input type="text" id="fPort" placeholder="port" size="6"
-        title="Matches as you type: 44 finds 443 and 445. Use =80 for exactly port 80.">
-      <select id="fAct">
-        <option value="">action: all</option>
-        <option value="Allow">allowed only</option>
-        <option value="blocked">blocked only</option>
-        <option value="NAT">NAT / forward only</option>
-      </select>
+      <span class="spacer"></span>
       <label><input type="checkbox" id="fPause"> pause</label>
-      <button id="fClear">Clear</button>
+      <button id="fClear">Clear filters</button>
       <a class="btn" id="csvLink" href="#">Download CSV</a>
       <span class="sub" id="meta"></span>
     </div>
     <div class="card table-scroll">
       <table id="log">
         <thead><tr>
-          <th>Time</th><th>Source IP</th><th>Destination IP</th>
-          <th>Proto</th><th class="num">Port</th><th>Action</th><th>Rule</th>
+          <th>Time
+            <select id="fMode" class="colf" title="Live tail, or a historical window from the retained data">
+              <option value="live">● Live</option>
+              <option value="3600">Last 1 hour</option>
+              <option value="86400">Last 24 hours</option>
+              <option value="604800">Last 7 days</option>
+            </select>
+          </th>
+          <th>Source IP<input type="text" class="colf" id="fSrc" placeholder="filter…"></th>
+          <th>Destination IP<input type="text" class="colf" id="fDst" placeholder="filter…"></th>
+          <th>Proto</th>
+          <th class="num">Port<input type="text" class="colf" id="fPort" placeholder="443 or =80"
+            title="Matches as you type: 44 finds 443 and 445. Use =80 for exactly port 80."></th>
+          <th>Action
+            <select id="fAct" class="colf">
+              <option value="">all</option>
+              <option value="Allow">allowed</option>
+              <option value="blocked">blocked</option>
+              <option value="NAT">NAT / forward</option>
+            </select>
+          </th>
+          <th>Rule<input type="text" class="colf" id="fRule" placeholder="filter…"></th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -454,7 +462,9 @@ function deviceByName(name) {
   return (stats ? stats.devices : []).find(d => d.name === name);
 }
 function currentFilters() {
-  return { ip:$("fIp").value.trim(), port:$("fPort").value.trim(), action:$("fAct").value };
+  return { src:$("fSrc").value.trim(), dst:$("fDst").value.trim(),
+           port:$("fPort").value.trim(), action:$("fAct").value,
+           rule:$("fRule").value.trim() };
 }
 function filterQuery() {
   const f = currentFilters(), p = new URLSearchParams();
@@ -543,7 +553,7 @@ function go(target) {
     $("sysTitle").textContent = target;
     $("sysMeta").textContent = d ? `${VENDOR_LABEL[d.vendor]||d.vendor} · udp/${d.port}` : "";
     updateSysStatus();
-    ["fIp","fPort"].forEach(id => $(id).value = "");
+    ["fSrc","fDst","fPort","fRule"].forEach(id => $(id).value = "");
     $("fAct").value = ""; $("fMode").value = "live"; $("fPause").checked = false;
     refetchSystem();
   } else {
@@ -581,11 +591,11 @@ $("fMode").addEventListener("change", () => {
   refetchSystem();
   if ($("fMode").value === "live") liveTimer = setInterval(pollLive, 2000);
 });
-["fIp","fPort"].forEach(id => $(id).addEventListener("input", debounce(refetchSystem, 350)));
+["fSrc","fDst","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refetchSystem, 350)));
 $("fAct").addEventListener("change", refetchSystem);
 $("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLive(); });
 $("fClear").addEventListener("click", () => {
-  ["fIp","fPort"].forEach(id => $(id).value = ""); $("fAct").value = ""; refetchSystem();
+  ["fSrc","fDst","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refetchSystem();
 });
 $("backBtn").addEventListener("click", () => go("overview"));
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }

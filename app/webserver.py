@@ -64,7 +64,8 @@ def _filters_from(params):
         raise ValueError("port filter must be numeric "
                          "(optionally prefixed with = for exact match)")
     return {"device": one("device"), "vendor": one("vendor"),
-            "ip": one("ip"), "port": port, "action": one("action")}
+            "ip": one("ip"), "src": one("src"), "dst": one("dst"),
+            "rule": one("rule"), "port": port, "action": one("action")}
 
 
 def _stats(state):

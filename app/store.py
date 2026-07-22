@@ -103,7 +103,9 @@ _BLOCK_ACTIONS = ("Block", "Drop", "Reject")
 
 
 def _filter_clauses(f):
-    """Build (clauses, args) from a filter dict for device/vendor/ip/port/action."""
+    """Build (clauses, args) from a filter dict. Supported keys:
+    device, vendor, ip (src OR dst substring, kept for compatibility),
+    src, dst, rule (substring), port, action."""
     clauses, args = [], []
     if f.get("device"):
         clauses.append("device = ?")
@@ -115,6 +117,15 @@ def _filter_clauses(f):
         clauses.append("(src LIKE ? OR dst LIKE ?)")
         like = f"%{f['ip']}%"
         args += [like, like]
+    if f.get("src"):
+        clauses.append("src LIKE ?")
+        args.append(f"%{f['src']}%")
+    if f.get("dst"):
+        clauses.append("dst LIKE ?")
+        args.append(f"%{f['dst']}%")
+    if f.get("rule"):
+        clauses.append("rule LIKE ?")
+        args.append(f"%{f['rule']}%")
     if f.get("port"):
         # Prefix match so the result narrows as the user types ("44"
         # matches 443 and 445), mirroring the substring IP filter.  A
@@ -150,7 +161,7 @@ _SELECT = ("SELECT id, ts, device, vendor, src, dst, proto, dst_port, "
 # LIVE_SCAN_CAP events; the incremental polls that follow (id > cursor) are
 # naturally bounded. Historical searches use the window API instead.
 LIVE_SCAN_CAP = 1_000_000
-_SCANNING_FILTERS = ("vendor", "ip", "port", "action")
+_SCANNING_FILTERS = ("vendor", "ip", "src", "dst", "rule", "port", "action")
 
 
 def query_live(db, since, filters, limit):

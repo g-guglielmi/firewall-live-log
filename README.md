@@ -235,11 +235,18 @@ shows lines that didn't match a parser.
 | `GET /api/stats` | Totals, rate, per-device activity, retention. |
 | `GET /api/devices` | Configured devices. |
 
-`action` filter accepts `Allow`, `blocked` (Block/Drop/Reject), or `NAT`
-(DNAT/SNAT/masquerade/port-forward translation records).
-`ip` matches as a substring of source or destination; `port` matches as
-a prefix (`44` finds 443 and 445) — prefix it with `=` for an exact
-match (`=80` excludes 8080).
+Filters (all optional, combined with AND): `device`, `vendor`, `src`,
+`dst`, `rule`, `port`, `action` — plus `ip` (matches source **or**
+destination, kept for compatibility). `src`, `dst`, `rule`, and `ip` match
+as substrings; `port` matches as a prefix (`44` finds 443 and 445) — prefix
+it with `=` for an exact match (`=80` excludes 8080). `action` accepts
+`Allow`, `blocked` (Block/Drop/Reject), or `NAT` (DNAT/SNAT/masquerade/
+port-forward translation records).
+
+In the dashboard these appear as per-column filter boxes under each log
+column (separate **Source IP** and **Destination IP**, plus **Rule**,
+**Port**, and **Action**); the **Time** column header switches between live
+tail and a historical window.
 
 When **live** tailing with a filter, the initial backfill only looks at
 recent activity (the most recent events), then follows new matches as they

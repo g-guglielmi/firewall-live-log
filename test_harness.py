@@ -307,6 +307,21 @@ def main():
     check("ip filter (src/dst substring)",
           all("192.168.10.55" in (e["src"], e["dst"]) for e in f["events"])
           and len(f["events"]) == 6, str(len(f["events"])))
+    f = get_json("/api/live?since=0&src=192.168.10.55")
+    check("src filter (source only)",
+          all("192.168.10.55" in e["src"] for e in f["events"])
+          and len(f["events"]) == 6, str(len(f["events"])))
+    f = get_json("/api/live?since=0&dst=10.9.9.9")
+    check("dst filter (destination only)",
+          all("10.9.9.9" in e["dst"] for e in f["events"])
+          and len(f["events"]) == 6, str(len(f["events"])))
+    f = get_json("/api/live?since=0&src=10.9.9.9")   # that value is a dst
+    check("src filter does not match destinations",
+          len(f["events"]) == 0, str(len(f["events"])))
+    f = get_json("/api/live?since=0&rule=Drop-RDP")
+    check("rule filter (substring)",
+          all(e["rule"] == "Drop-RDP" for e in f["events"])
+          and len(f["events"]) == 6, str(len(f["events"])))
     f = get_json("/api/live?since=0&device=UDM-Test")
     check("device filter",
           all(e["device"] == "UDM-Test" for e in f["events"])
