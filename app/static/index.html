@@ -95,10 +95,13 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
 .sysbar .title { font-size:16px; font-weight:650; }
 .sysbar label { color:var(--ink-2); font-size:12.5px; display:inline-flex; gap:5px; align-items:center; }
-table { border-collapse:collapse; width:100%; font-size:13px; }
+/* separate (not collapse) so the sticky header keeps its own background and
+   bottom border and layers above the scrolling rows instead of letting them
+   bleed on top */
+table { border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }
 th,td { text-align:left; padding:5px 9px; border-bottom:1px solid var(--grid); vertical-align:top; }
 th { color:var(--ink-2); font-weight:600; font-size:12px; white-space:nowrap;
-  position:sticky; top:0; background:var(--surface); }
+  position:sticky; top:0; background:var(--surface); z-index:3; }
 /* per-column filter controls that live inside the header cells */
 .colf { display:block; width:100%; margin-top:5px; font:inherit; font-size:12px;
   font-weight:400; color:var(--ink); background:var(--page);
