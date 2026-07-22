@@ -115,7 +115,11 @@ th.narrow { width:1%; }
 #fPort { width:92px; }
 td.mono,td.ip,td.port { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace; font-size:12.5px; }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
-.table-scroll { overflow-x:auto; max-height:68vh; overflow-y:auto; }
+/* The scroll container carries the card look but NO padding: a top padding
+   here would sit ABOVE the sticky header, and scrolling rows would show in
+   that strip. border-radius + overflow clips the rounded corners. */
+.table-scroll { background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; overflow:auto; max-height:68vh; }
 tbody tr.ev-allow td { background:var(--tint-good); }
 tbody tr.ev-block td { background:var(--tint-bad); }
 tbody tr.ev-nat td { background:var(--tint-nat); }
@@ -228,7 +232,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
       <a class="btn" id="csvLink" href="#">Download CSV</a>
       <span class="sub" id="meta"></span>
     </div>
-    <div class="card table-scroll">
+    <div class="table-scroll">
       <table id="log">
         <thead><tr>
           <th>Time
