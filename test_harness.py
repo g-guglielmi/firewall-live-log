@@ -395,6 +395,11 @@ def main():
     st = get_json("/api/stats")
     check("stats parsed = 63 (lifetime)", st["parsed"] == 63, str(st["parsed"]))
     check("stats unparsed = 1", st["unparsed"] == 1, str(st["unparsed"]))
+    # db_bytes: on-disk footprint, >= the main file, and reasonable for 63 rows.
+    _main = os.path.getsize(db_path)
+    check("stats db_bytes present and covers the on-disk files",
+          isinstance(st["db_bytes"], int) and st["db_bytes"] >= _main > 0,
+          f"db_bytes={st.get('db_bytes')} main={_main}")
     dmap = {d["name"]: d for d in st["devices"]}
     check("per-device totals from meta (scan-free)",
           dmap["UDM-Test"]["events"] == 36

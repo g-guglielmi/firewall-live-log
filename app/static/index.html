@@ -355,6 +355,13 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n).toLocaleString("en-US");
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(n < 10 ? 2 : 1)) + " " + u[i];
+}
 
 /* ---------------- Auth ---------------- */
 let csrfToken = "", me = null;
@@ -462,6 +469,7 @@ function renderOverview() {
     ["Systems receiving", receiving + " / " + devs.length, "active in last 2 min"],
     ["Events / min", fmt(stats.events_last_min), "across the fleet"],
     ["Events received", fmt(stats.parsed), span],
+    ["Disk usage", fmtBytes(stats.db_bytes), "events database (incl. WAL)"],
     ["Retention", stats.retention_days + " days", stats.max_events ? "cap " + fmt(stats.max_events) : "time-based"],
     ["Dropped", fmt(stats.dropped), "queue overflow"],
     ["Unparsed", fmt(stats.unparsed), "kept for diagnosis"],

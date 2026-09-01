@@ -6,6 +6,7 @@ Concurrency model: a single writer thread owns the read-write connection
 connection guarded by a lock.  WAL mode lets reads proceed during writes.
 """
 
+import os
 import sqlite3
 import time
 
@@ -78,6 +79,19 @@ def insert_unparsed(db, rows):
     if rows:
         db.executemany(
             "INSERT INTO unparsed (ts, device, raw) VALUES (?,?,?)", rows)
+
+
+def db_disk_bytes(path):
+    """Total bytes the database occupies on disk: the main file plus its WAL
+    and shared-memory sidecars (which can be sizeable between checkpoints).
+    Missing files count as 0 so this never raises."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(path + suffix)
+        except OSError:
+            pass
+    return total
 
 
 def prune(db, retention_days, max_events, unparsed_cap=10000):

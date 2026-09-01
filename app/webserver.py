@@ -129,6 +129,7 @@ def _stats(state):
         return {
             "events_last_min": sum(recent.values()),
             "oldest": span[0], "newest": span[1],
+            "db_bytes": store.db_disk_bytes(state.db_path),
             "retention_days": state.cfg.retention_days,
             "max_events": state.cfg.max_events,
             "unparsed": unparsed,
