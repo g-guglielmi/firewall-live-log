@@ -661,26 +661,90 @@ function refetchSystem() {
   if ($("fMode").value === "live") pollLive(); else loadWindow();
 }
 
-/* ---------------- Navigation ---------------- */
-function go(target) {
+/* ---------------- Navigation + URL state ---------------- */
+function setLiveTimer(on) {
+  clearInterval(liveTimer); liveTimer = null;
+  if (on) liveTimer = setInterval(pollLive, 2000);
+}
+function setSysHeader() {
+  const d = deviceByName(view);
+  $("sysTitle").textContent = view;
+  $("sysMeta").textContent = d ? `${VENDOR_LABEL[d.vendor]||d.vendor} · udp/${d.port}` : "";
+  updateSysStatus();
+}
+// Serialize the current view + filters into the address bar so a refresh (or a
+// shared link) lands on the same place instead of being bounced to the overview.
+function stateParams() {
+  const p = new URLSearchParams();
+  if (view !== "overview") {
+    p.set("view", view);
+    const f = currentFilters();
+    for (const k of ["src","dst","proto","port","rule"]) if (f[k]) p.set(k, f[k]);
+    if (f.action) p.set("act", f.action);
+    const m = $("fMode").value;
+    if (m !== "live") p.set("mode", m);
+    if (m === "custom") {
+      p.set("from", String(customFrom));
+      if (customTo !== null) p.set("to", String(customTo));
+    }
+  }
+  return p;
+}
+function syncUrl(push) {
+  const qs = stateParams().toString();
+  const url = qs ? "?" + qs : location.pathname;
+  history[push ? "pushState" : "replaceState"](null, "", url);
+}
+// target: "overview" or a device name. opts.state restores filters from the URL
+// (else they reset); opts.push=false updates the URL in place (load/back/forward).
+function go(target, opts) {
+  opts = opts || {};
+  const st = opts.state || null, push = opts.push !== false;
   view = target;
   const isSys = target !== "overview";
   $("page-overview").style.display = isSys ? "none" : "";
   $("page-system").style.display = isSys ? "" : "none";
   renderTabs();
   if (isSys) {
-    const d = deviceByName(target);
-    $("sysTitle").textContent = target;
-    $("sysMeta").textContent = d ? `${VENDOR_LABEL[d.vendor]||d.vendor} · udp/${d.port}` : "";
-    updateSysStatus();
-    ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = "");
-    $("fAct").value = ""; $("fMode").value = "live"; $("fPause").checked = false;
-    $("rangeBar").style.display = "none";
+    setSysHeader();
+    $("fSrc").value = (st && st.src) || "";
+    $("fDst").value = (st && st.dst) || "";
+    $("fProto").value = (st && st.proto) || "";
+    $("fPort").value = (st && st.port) || "";
+    $("fRule").value = (st && st.rule) || "";
+    $("fAct").value = (st && st.act) || "";
+    $("fPause").checked = false;
+    const mode = (st && st.mode) || "live";
+    $("fMode").value = mode;
+    if (mode === "custom") {
+      const now = Math.floor(Date.now() / 1000);
+      customFrom = (st && Number(st.from)) || (now - 3600);
+      customTo = (st && st.to != null && st.to !== "") ? Number(st.to) : null;
+      $("rFrom").value = toLocalInput(customFrom);
+      $("rTo").value = customTo !== null ? toLocalInput(customTo) : "";
+      rangeMsg(customTo === null ? "From the selected time to now." : "");
+      $("rangeBar").style.display = "flex";
+    } else {
+      $("rangeBar").style.display = "none";
+    }
+    setLiveTimer(mode === "live");
     refetchSystem();
   } else {
+    setLiveTimer(false);
     renderOverview();
   }
+  syncUrl(push);
 }
+function restoreFromUrl(push) {
+  const p = new URLSearchParams(location.search);
+  const v = p.get("view");
+  if (!v) { go("overview", { push: push }); return; }
+  go(v, { push: push, state: {
+    src: p.get("src") || "", dst: p.get("dst") || "", proto: p.get("proto") || "",
+    port: p.get("port") || "", rule: p.get("rule") || "", act: p.get("act") || "",
+    mode: p.get("mode") || "live", from: p.get("from"), to: p.get("to") } });
+}
+window.addEventListener("popstate", () => restoreFromUrl(false));
 function updateSysStatus() {
   if (view === "overview" || !stats) return;
   const d = deviceByName(view);
@@ -700,20 +764,21 @@ async function loadStats() {
     const s = await r.json();
     stats = s;
     renderTabs(); renderFleetPill();
-    if (view === "overview") renderOverview(); else updateSysStatus();
+    if (view === "overview") renderOverview(); else setSysHeader();
     $("updated").textContent = "updated " + new Date().toLocaleTimeString();
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
 }
 
-/* filter + mode listeners (system view) */
+/* filter + mode listeners (system view). refilter re-runs the query AND writes
+   the new filter/mode state into the address bar (in place, no history spam). */
+function refilter() { refetchSystem(); syncUrl(false); }
 $("fMode").addEventListener("change", () => {
-  clearInterval(liveTimer); liveTimer = null;
   const m = $("fMode").value;
-  if (m === "custom") { showRangeBar(); return; }   // fetch waits for Apply
+  if (m === "custom") { setLiveTimer(false); showRangeBar(); return; }  // waits for Apply
   $("rangeBar").style.display = "none";
-  refetchSystem();
-  if (m === "live") liveTimer = setInterval(pollLive, 2000);
+  setLiveTimer(m === "live");
+  refilter();
 });
 function rangeMsg(text, err) {
   const el = $("rMsg");
@@ -736,18 +801,18 @@ function applyRange() {
   if (to !== null && to <= from) { rangeMsg("'To' must be after 'From'.", true); return; }
   customFrom = from; customTo = to;
   rangeMsg(to === null ? "From the selected time to now." : "");
-  refetchSystem();
+  refilter();
 }
 $("rApply").addEventListener("click", applyRange);
 $("rNow").addEventListener("click",
   () => { $("rTo").value = toLocalInput(Math.floor(Date.now() / 1000)); });
 ["rFrom", "rTo"].forEach(id => $(id).addEventListener("keydown",
   e => { if (e.key === "Enter") applyRange(); }));
-["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refetchSystem, 350)));
-$("fAct").addEventListener("change", refetchSystem);
+["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refilter, 350)));
+$("fAct").addEventListener("change", refilter);
 $("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLive(); });
 $("fClear").addEventListener("click", () => {
-  ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refetchSystem();
+  ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refilter();
 });
 $("loadOlderBtn").addEventListener("click", loadOlder);
 $("backBtn").addEventListener("click", () => go("overview"));
@@ -888,7 +953,7 @@ $("logoutBtn").addEventListener("click", async () => {
 loadMe();
 loadStats();
 setInterval(loadStats, 5000);
-liveTimer = setInterval(pollLive, 2000);
+restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)
 </script>
 </body>
 </html>
