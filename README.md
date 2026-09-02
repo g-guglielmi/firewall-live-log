@@ -238,6 +238,43 @@ shows lines that didn't match a parser.
 `/api/events` and `/api/events.csv` also accept a custom time range instead
 of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
 
+### Response format
+
+`/api/live` and `/api/events` return JSON. Each event is:
+
+```json
+{
+  "id": 84213,          // monotonic row id (use as the live cursor / page marker)
+  "ts": 1717243200,     // event time, epoch seconds (UTC)
+  "device": "UDM-Pro",  // configured device name
+  "vendor": "unifi",    // unifi | sophos
+  "src": "10.0.10.5",   // source IP
+  "dst": "93.184.216.34", // destination IP
+  "proto": "TCP",       // TCP | UDP | ICMP | …
+  "dst_port": 443,      // destination port, or -1 when not applicable (e.g. ICMP)
+  "action": "Allow",    // Allow | Block | Drop | Reject | NAT | "?"
+  "rule": "Allow LAN web" // firewall rule name/description, may be ""
+}
+```
+
+- **`GET /api/events`** → `{"events": [ … ]}`, newest-first. Page further back
+  with `before=<id>` (returns only events with a smaller id).
+- **`GET /api/live?since=<cursor>`** → `{"cursor": <id>, "events": [ … ]}`,
+  oldest-first. Poll by passing the previous response's `cursor` back as
+  `since`; `since=0` backfills recent activity. Empty poll returns the same
+  cursor and `[]`.
+- **`GET /api/events.csv`** → CSV with a header row (`time,device,vendor,src,
+  dst,proto,dst_port,action,rule`); `time` is local, uncapped by row limit.
+- **`GET /api/stats`** → totals, per-device activity, `oldest`/`newest`
+  timestamps, `db_bytes`, retention, and `now` (server epoch).
+
+Example — everything blocked in the last hour, as JSON:
+
+```sh
+curl -H "Authorization: Bearer fll_xxxxxxxx…" \
+  "https://firewall.example.com/api/events?window=3600&action=blocked"
+```
+
 ### Programmatic access (API keys)
 
 External tools can pull logs without a browser session using a **read-only

@@ -1046,11 +1046,41 @@ async function revokeKey(id, name) {
 }
 $("keysBtn").addEventListener("click", openKeys);
 $("keysClose").addEventListener("click", () => $("keysModal").classList.remove("open"));
+function selectKeyText() {
+  const el = $("keyValue"), sel = window.getSelection(), r = document.createRange();
+  r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
+}
+function legacyCopy(text) {
+  // Fallback for non-secure (HTTP) contexts where navigator.clipboard is
+  // unavailable — the classic hidden-textarea + execCommand trick.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
+}
+// Clicking the key selects it, so Ctrl+C always works even if the button can't.
+$("keyValue").addEventListener("click", selectKeyText);
 $("keyCopy").addEventListener("click", async () => {
   const v = $("keyValue").textContent;
-  try { await navigator.clipboard.writeText(v); $("keyCopy").textContent = "Copied"; }
-  catch (e) { $("keyCopy").textContent = "Copy failed — select it manually"; }
-  setTimeout(() => { $("keyCopy").textContent = "Copy"; }, 1500);
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(v); ok = true;
+    }
+  } catch (e) { ok = false; }
+  if (!ok) ok = legacyCopy(v);
+  if (ok) {
+    $("keyCopy").textContent = "Copied";
+  } else {
+    selectKeyText();               // last resort: highlight it for manual Ctrl+C
+    $("keyCopy").textContent = "Selected — press Ctrl+C";
+  }
+  setTimeout(() => { $("keyCopy").textContent = "Copy"; }, 1800);
 });
 $("nkCreate").addEventListener("click", async () => {
   const name = $("nkName").value.trim();
