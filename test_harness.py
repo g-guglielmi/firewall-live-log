@@ -106,6 +106,27 @@ def get_json(path):
         return json.loads(r.read())
 
 
+def api_get(path, key):
+    """GET with an Authorization: Bearer key and NO session cookie (a bare
+    opener), so a 200 proves the key authenticated, not a leaked session.
+    Returns (status, parsed_json_or_{}, raw_bytes)."""
+    req = urllib.request.Request(BASE + path)
+    if key is not None:
+        req.add_header("Authorization", "Bearer " + key)
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        r = e
+    body = r.read()
+    code = r.status if hasattr(r, "status") else r.code
+    try:
+        parsed = json.loads(body) if body and "json" in \
+            r.headers.get("Content-Type", "") else {}
+    except ValueError:
+        parsed = {}
+    return code, parsed, body
+
+
 def unifi_line(tag, descr, src, dst, proto, dpt=None):
     parts = ["<4>Jul 18 12:00:00 UDM kernel:", f"[{tag}]", f'DESCR="{descr}"',
              f"IN=br0 OUT=eth0 SRC={src} DST={dst} TTL=63 PROTO={proto}"]
@@ -513,6 +534,73 @@ def main():
                        {"id": viewer_id, "role": "admin"}, csrf=v_csrf)
     check("non-admin cannot set roles (403)", code == 403, str(code))
 
+    print("== api keys ==")
+    # Non-admin (viewer1, still logged in via op2) cannot mint keys.
+    code, _ = op2_json("/api/api_keys", {"name": "sneaky"}, csrf=v_csrf)
+    check("non-admin cannot create API keys (403)", code == 403, str(code))
+    code, kl = op2_json("/api/api_keys", None, method="GET", csrf=v_csrf)
+    check("non-admin cannot list API keys (403)", code == 403, str(code))
+    # State-changing key routes need CSRF like the rest.
+    code, _, _ = request("POST", "/api/api_keys", {"name": "nocsrf-key"},
+                         csrf=False)
+    check("create API key without CSRF rejected (403)", code == 403, str(code))
+    # Admin mints a key; the raw key is returned exactly once, with the prefix.
+    code, body, _ = request("POST", "/api/api_keys", {"name": "reader"},
+                            csrf=True)
+    api_key = body.get("key", "")
+    key_id = body.get("id")
+    check("admin creates an API key (201)",
+          code == 201 and api_key.startswith("fll_"), f"{code} {body}")
+    code, _, _ = request("POST", "/api/api_keys", {"name": "   "}, csrf=True)
+    check("blank key name rejected (400)", code == 400, str(code))
+    # Listing shows the prefix and metadata, never the raw key or its hash.
+    _, kl2, _ = request("GET", "/api/api_keys")
+    klist = kl2.get("api_keys", [])
+    check("key listed by prefix, never the raw value",
+          any(k["id"] == key_id and api_key.startswith(k["prefix"])
+              and "key" not in k and "key_hash" not in k for k in klist),
+          str(klist))
+
+    # The key authenticates the read API with no session cookie present.
+    code, ev, _ = api_get("/api/events?window=86400&device=UDM-Test", api_key)
+    check("API key reads /api/events (200)",
+          code == 200 and len(ev.get("events", [])) == 36,
+          f"{code} {len(ev.get('events', []))}")
+    code, lv, _ = api_get("/api/live?since=0&limit=2000", api_key)
+    check("API key reads /api/live (200)",
+          code == 200 and len(lv.get("events", [])) == 63, str(code))
+    code, stx, _ = api_get("/api/stats", api_key)
+    check("API key reads /api/stats (200)",
+          code == 200 and stx.get("parsed") == 63, str(code))
+    code, dv, _ = api_get("/api/devices", api_key)
+    check("API key reads /api/devices (200)",
+          code == 200 and len(dv) == 3, str(code))
+    code, _, cbody = api_get("/api/events.csv?window=86400", api_key)
+    check("API key downloads CSV (200)",
+          code == 200 and cbody.decode().startswith("time,device,vendor,"),
+          str(code))
+    # last_used_at is recorded after use.
+    _, kl3, _ = request("GET", "/api/api_keys")
+    check("last_used_at populated after the key is used",
+          any(k["id"] == key_id and k["last_used_at"] for k in
+              kl3.get("api_keys", [])), str(kl3.get("api_keys")))
+    # No credentials, or a bad key, is refused.
+    code, _, _ = api_get("/api/events?window=86400", None)
+    check("no credentials on the read API -> 401", code == 401, str(code))
+    code, _, _ = api_get("/api/events?window=86400", "fll_not-a-real-key-xyz")
+    check("bad API key -> 401", code == 401, str(code))
+    # A key must NOT reach management/session routes (least privilege).
+    for p in ("/api/users", "/api/me", "/api/api_keys"):
+        code, _, _ = api_get(p, api_key)
+        check(f"API key cannot reach {p} (401)", code == 401, str(code))
+    # Revoke over HTTP; the key stops authenticating immediately.
+    code, _, _ = request("DELETE", "/api/api_keys/" + str(key_id), csrf=True)
+    check("admin revokes an API key (200)", code == 200, str(code))
+    code, _, _ = api_get("/api/events?window=86400", api_key)
+    check("revoked key no longer authenticates (401)", code == 401, str(code))
+    code, _, _ = request("DELETE", "/api/api_keys/999999", csrf=False)
+    check("revoke without CSRF rejected (403)", code == 403, str(code))
+
     print("== rate limiting (5 fails / 15 min) ==")
     for i in range(5):
         code, _, _ = request("POST", "/api/login",
@@ -673,6 +761,29 @@ def main():
     check("max ttl caps the session despite activity",
           am2.get_session(tokc) is None)
     am2.close()
+
+    print("== api key verification (unit) ==")
+    ak = authmod.AuthManager(os.path.join(tmp, "apikeys.db"))
+    kid, raw = ak.create_api_key("live", created_by=None,
+                                 expires_at=int(time.time()) + 3600)
+    check("a valid key verifies", ak.verify_api_key(raw) is not None)
+    check("the wrong key does not verify",
+          ak.verify_api_key("fll_" + "z" * 40) is None)
+    check("a key without the fll_ prefix is rejected",
+          ak.verify_api_key(raw[4:]) is None)
+    # Expire it by hand; it must stop verifying.
+    ak.db.execute("UPDATE api_keys SET expires_at = ? WHERE id = ?",
+                  (int(time.time()) - 1, kid))
+    ak.db.commit()
+    check("an expired key does not verify", ak.verify_api_key(raw) is None)
+    # A past expiry at creation is refused.
+    try:
+        ak.create_api_key("past", expires_at=int(time.time()) - 10)
+        past_rejected = False
+    except authmod.AuthError:
+        past_rejected = True
+    check("creating a key with a past expiry is rejected", past_rejected)
+    ak.close()
 
     print("== mailer TLS options ==")
     import ssl as _ssl

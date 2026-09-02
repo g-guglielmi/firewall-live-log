@@ -235,6 +235,26 @@ shows lines that didn't match a parser.
 | `GET /api/stats` | Totals, rate, per-device activity, retention. |
 | `GET /api/devices` | Configured devices. |
 
+`/api/events` and `/api/events.csv` also accept a custom time range instead
+of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
+
+### Programmatic access (API keys)
+
+External tools can pull logs without a browser session using a **read-only
+API key**. An admin creates one under the avatar menu → **Manage API keys**
+(the raw key is shown once; only its hash is stored). Send it as a bearer
+token:
+
+```sh
+curl -H "Authorization: Bearer fll_xxxxxxxx…" \
+  "https://firewall.example.com/api/events.csv?window=86400&action=blocked"
+```
+
+Keys reach only the five read endpoints above (events, live, stats,
+devices, CSV) — never account or key management — and can be given an
+optional expiry and revoked at any time. Keys are meaningful only with
+`AUTH_ENABLED=true`; with auth off, the whole API is already open.
+
 Filters (all optional, combined with AND): `device`, `vendor`, `src`,
 `dst`, `proto`, `rule`, `port`, `action` — plus `ip` (matches source **or**
 destination, kept for compatibility). `src`, `dst`, `proto`, `rule`, and

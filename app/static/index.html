@@ -185,6 +185,17 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 .utable td, .utable th { padding:6px 8px; border-bottom:1px solid var(--grid); font-size:13px; }
 .rolesel { width:auto; padding:3px 7px; font-size:12.5px; }
 .tag { font-size:11px; border:1px solid var(--border); border-radius:999px; padding:1px 8px; color:var(--ink-2); }
+.keybox { display:none; margin-top:14px; padding:12px 13px; border-radius:10px;
+  background:var(--tint-good); border:1px solid var(--good); }
+.keybox.show { display:block; }
+.keybox .lbl { font-size:12.5px; font-weight:650; }
+.keybox code { display:block; font-family:ui-monospace,"Cascadia Mono",Menlo,monospace;
+  font-size:12.5px; word-break:break-all; margin:7px 0; color:var(--ink);
+  background:var(--page); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+.keybox .warn { font-size:12px; color:var(--ink-2); }
+.hint { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
+.hint code { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace;
+  background:var(--page); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
 </style>
 </head>
 <body>
@@ -208,6 +219,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         </div>
         <div class="menu-sep"></div>
         <button class="menu-item" id="usersBtn" role="menuitem" style="display:none">Manage users</button>
+        <button class="menu-item" id="keysBtn" role="menuitem" style="display:none">Manage API keys</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
         <div class="menu-sep"></div>
@@ -340,6 +352,48 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   </div>
 </div>
 
+<!-- API-key management modal (admin) -->
+<div class="modal-back" id="keysModal">
+  <div class="modal">
+    <h3>API keys</h3>
+    <div class="sub">Read-only bearer tokens so external tools can pull logs
+      via the API. A key can read events, the live tail, stats and the device
+      list — it can never manage users, keys, or anything else.</div>
+    <table class="utable"><tbody id="keyRows"></tbody></table>
+    <div class="keybox" id="keyReveal">
+      <div class="lbl">New key — copy it now</div>
+      <code id="keyValue"></code>
+      <span class="warn">This is the only time the full key is shown. Store it
+        somewhere safe; if you lose it, revoke it and create a new one.</span>
+      <div class="actions" style="margin-top:10px">
+        <button id="keyCopy">Copy</button>
+      </div>
+    </div>
+    <h3 style="margin-top:18px;font-size:14px">Create a key</h3>
+    <div class="row2">
+      <div>
+        <label for="nkName">Name (what it's for)</label>
+        <input id="nkName" type="text" maxlength="64" autocomplete="off"
+               placeholder="e.g. Grafana, backup script">
+      </div>
+      <div>
+        <label for="nkExpiry">Expires in (days, optional)</label>
+        <input id="nkExpiry" type="number" min="1" max="3650" step="1"
+               autocomplete="off" placeholder="never">
+      </div>
+    </div>
+    <div class="msg" id="keysMsg"></div>
+    <div class="actions">
+      <button id="keysClose">Close</button>
+      <button class="primary" id="nkCreate">Create key</button>
+    </div>
+    <div class="hint">Use a key with an <code>Authorization: Bearer</code>
+      header, e.g.<br>
+      <code>curl -H "Authorization: Bearer &lt;key&gt;" &lt;this-site&gt;/api/events.csv?window=86400</code>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
@@ -400,6 +454,7 @@ async function loadMe() {
   $("who").innerHTML = `${esc(me.username)}<span class="rl">${esc(me.role)}</span>`;
   $("whoEmail").textContent = me.email || "no email set";
   $("usersBtn").style.display = me.role === "admin" ? "" : "none";
+  $("keysBtn").style.display = me.role === "admin" ? "" : "none";
   $("userbar").style.display = "";
   if (me.must_change_pw) { openPw(true); }
 }
@@ -944,6 +999,76 @@ $("nuCreate").addEventListener("click", async () => {
     $("nuName").value = ""; $("nuPass").value = "";
     refreshUsers();
   } catch (e) { modalMsg("usersMsg", "Network error."); }
+});
+/* ---------------- API keys (admin) ---------------- */
+function fmtWhen(sec) {
+  if (!sec) return "";
+  return new Date(sec * 1000).toLocaleString();
+}
+function openKeys() {
+  modalMsg("keysMsg", "");
+  $("nkName").value = ""; $("nkExpiry").value = "";
+  $("keyReveal").classList.remove("show"); $("keyValue").textContent = "";
+  $("keysModal").classList.add("open");
+  refreshKeys();
+}
+async function refreshKeys() {
+  const res = await fetch("/api/api_keys"); if (gone(res)) return;
+  if (res.status === 403) { modalMsg("keysMsg", "Admin access required."); return; }
+  const data = await res.json();
+  const now = Date.now() / 1000;
+  const keys = data.api_keys || [];
+  $("keyRows").innerHTML = keys.length ? keys.map(k => {
+    const expired = k.expires_at && k.expires_at < now;
+    const exp = k.expires_at
+      ? (expired ? '<span class="tag">expired</span>' : "expires " + esc(fmtWhen(k.expires_at)))
+      : '<span class="sub">no expiry</span>';
+    const used = k.last_used_at ? "used " + esc(fmtWhen(k.last_used_at))
+                                : '<span class="sub">never used</span>';
+    return `<tr><td><b>${esc(k.name)}</b><div class="sub">${esc(k.prefix)}…</div></td>
+      <td>${used}<div class="sub">created ${esc(fmtWhen(k.created_at))}${
+        k.created_by ? " by " + esc(k.created_by) : ""}</div></td>
+      <td>${exp}</td>
+      <td style="text-align:right"><button class="linkbtn" data-revoke="${k.id}"
+        data-name="${esc(k.name)}">Revoke</button></td></tr>`;
+  }).join("") : `<tr><td class="sub" colspan="4">No API keys yet.</td></tr>`;
+  $("keyRows").querySelectorAll("[data-revoke]").forEach(b =>
+    b.addEventListener("click", () => revokeKey(b.dataset.revoke, b.dataset.name)));
+}
+async function revokeKey(id, name) {
+  if (!window.confirm(`Revoke API key "${name}"? Any tool using it will stop working.`)) return;
+  const res = await apiSend("DELETE", "/api/api_keys/" + encodeURIComponent(id));
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) return modalMsg("keysMsg", data.error || "Revoke failed.");
+  modalMsg("keysMsg", `Revoked "${name}".`, true);
+  refreshKeys();
+}
+$("keysBtn").addEventListener("click", openKeys);
+$("keysClose").addEventListener("click", () => $("keysModal").classList.remove("open"));
+$("keyCopy").addEventListener("click", async () => {
+  const v = $("keyValue").textContent;
+  try { await navigator.clipboard.writeText(v); $("keyCopy").textContent = "Copied"; }
+  catch (e) { $("keyCopy").textContent = "Copy failed — select it manually"; }
+  setTimeout(() => { $("keyCopy").textContent = "Copy"; }, 1500);
+});
+$("nkCreate").addEventListener("click", async () => {
+  const name = $("nkName").value.trim();
+  const expiry = $("nkExpiry").value.trim();
+  if (!name) return modalMsg("keysMsg", "Give the key a name.");
+  const body = { name };
+  if (expiry) body.expires_days = Number(expiry);
+  try {
+    const res = await apiSend("POST", "/api/api_keys", body);
+    if (gone(res)) return;
+    const data = await res.json();
+    if (!res.ok) return modalMsg("keysMsg", data.error || "Could not create key.");
+    $("keyValue").textContent = data.key;
+    $("keyReveal").classList.add("show");
+    modalMsg("keysMsg", `Created "${name}".`, true);
+    $("nkName").value = ""; $("nkExpiry").value = "";
+    refreshKeys();
+  } catch (e) { modalMsg("keysMsg", "Network error."); }
 });
 $("logoutBtn").addEventListener("click", async () => {
   try { await apiSend("POST", "/api/logout"); } catch (e) {}

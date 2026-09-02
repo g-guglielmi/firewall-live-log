@@ -56,6 +56,12 @@ def _clamp(params, key, default, hi, lo=1):
 
 MAX_RANGE_SEC = 366 * 86400          # widest custom range we'll accept
 
+# Read-only data routes an API key (Authorization: Bearer) may reach. Session
+# and management routes (/, /api/me, /api/users, /api/api_keys, …) are never
+# in this set, so a key can only ever read logs — never touch accounts/keys.
+API_KEY_ROUTES = frozenset({"/api/events", "/api/events.csv", "/api/live",
+                            "/api/stats", "/api/devices"})
+
 
 def _range_from(params, default_window):
     """Resolve the time window for a history query into (start_ts, end_ts).
@@ -242,6 +248,17 @@ class Handler(BaseHTTPRequestHandler):
         self._user_cache = result
         return result
 
+    def _api_key_principal(self, path):
+        """A valid ``Authorization: Bearer <key>`` grants read-only access to
+        the data routes in API_KEY_ROUTES. Returns the key principal or None.
+        No-op (None) when auth is disabled or the route isn't key-accessible."""
+        if not (self.auth_enabled and self.auth) or path not in API_KEY_ROUTES:
+            return None
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer "):
+            return None
+        return self.auth.verify_api_key(hdr[7:].strip(), self._client_ip())
+
     def _cookie_secure(self):
         return (self.force_secure_cookie
                 or self.headers.get("X-Forwarded-Proto", "").lower() == "https")
@@ -307,13 +324,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             authed = self.current_user()
-            if not authed:
+            if authed:
+                user = authed[0]
+            elif self._api_key_principal(path):
+                # An API-key client: read-only access to the data routes only.
+                user = None
+            else:
                 if path.startswith("/api/"):
                     self._json({"error": "authentication required"}, 401)
                 else:
                     self._redirect("/login")
                 return
-            user = authed[0]
 
             if path in ("/", "/index.html"):
                 self._serve_html("index.html")
@@ -333,6 +354,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "admin required"}, 403)
                     return
                 self._json({"users": self.auth.list_users()})
+                return
+            if path == "/api/api_keys":
+                if user["role"] != "admin":
+                    self._json({"error": "admin required"}, 403)
+                    return
+                self._json({"api_keys": self.auth.list_api_keys()
+                            if self.auth else []})
                 return
             if path == "/api/stats":
                 self._json(_stats(self.state))
@@ -440,6 +468,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/users/set_role":
                 self._handle_set_role(user)
                 return
+            if path == "/api/api_keys":
+                self._handle_create_api_key(user)
+                return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
             self._json({"error": str(e)}, e.code)
@@ -462,6 +493,21 @@ class Handler(BaseHTTPRequestHandler):
             user, csrf = authed
             if self.auth_enabled and not self._check_csrf(csrf):
                 self._json({"error": "invalid or missing CSRF token"}, 403)
+                return
+            kprefix = "/api/api_keys/"
+            if path.startswith(kprefix):
+                if user["role"] != "admin":
+                    self._json({"error": "admin required"}, 403)
+                    return
+                if not self.auth:
+                    self._json({"error": "authentication is disabled"}, 400)
+                    return
+                tail = path[len(kprefix):]
+                if not tail.isdigit():
+                    self._json({"error": "key id must be numeric"}, 400)
+                    return
+                self.auth.delete_api_key(int(tail))
+                self._json({"ok": True})
                 return
             prefix = "/api/users/"
             if path.startswith(prefix):
@@ -587,6 +633,33 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.auth.set_role(target, role)
         self._json({"ok": True})
+
+    def _handle_create_api_key(self, user):
+        if user["role"] != "admin":
+            self._json({"error": "admin required"}, 403)
+            return
+        if not self.auth:
+            self._json({"error": "authentication is disabled"}, 400)
+            return
+        body = self._read_json_body()
+        expires_at = None
+        days = body.get("expires_days")
+        if days not in (None, "", 0, "0"):
+            try:
+                days = int(days)
+            except (TypeError, ValueError):
+                self._json({"error": "expires_days must be a whole number"},
+                           400)
+                return
+            if days <= 0 or days > 3650:
+                self._json({"error": "expires_days must be between 1 and 3650"},
+                           400)
+                return
+            expires_at = int(time.time()) + days * 86400
+        # The raw key is returned exactly once — only its hash is stored.
+        key_id, raw = self.auth.create_api_key(
+            body.get("name", ""), created_by=user["id"], expires_at=expires_at)
+        self._json({"ok": True, "id": key_id, "key": raw}, 201)
 
     # -- public self-service password reset --------------------------------
     def _handle_forgot_password(self):

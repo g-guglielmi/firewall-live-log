@@ -45,6 +45,12 @@ RESET_WINDOW_SEC = 60 * 60           # rate-limit window for reset requests
 RESET_MAX_PER_USER = 5               # ...per account within the window
 RESET_MAX_PER_IP = 20                # ...per source IP within the window
 
+# API keys (bearer tokens for programmatic, read-only access).
+API_KEY_PREFIX = "fll_"             # recognisable prefix (helps secret scanners)
+API_KEY_DISPLAY_LEN = 12            # chars kept in clear for the UI ("fll_" + 8)
+API_KEY_TOUCH_SEC = 60             # throttle last_used_at writes to 1/min/key
+MAX_API_KEYS = 100                 # safety cap on how many can exist at once
+
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{2,63}$")
 # Deliberately simple: one @, no spaces/control chars (which also blocks
 # header injection), a dot in the domain. Real deliverability is SMTP's job.
@@ -116,6 +122,19 @@ def _validate_password(password):
     if len(password) > 1024:
         raise AuthError("password too long")
     return password
+
+
+def _validate_key_name(name):
+    """Return a cleaned, human label for an API key (1-64 printable chars,
+    no control characters). Raises AuthError on bad input."""
+    if not isinstance(name, str):
+        raise AuthError("key name must be a string")
+    name = name.strip()
+    if not (1 <= len(name) <= 64):
+        raise AuthError("key name must be 1-64 characters")
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise AuthError("key name must not contain control characters")
+    return name
 
 
 def _validate_email(email):
@@ -191,6 +210,16 @@ class AuthManager:
                 ON password_resets(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_resets_ip
                 ON password_resets(request_ip, created_at);
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT NOT NULL,
+                key_hash     TEXT NOT NULL UNIQUE,
+                prefix       TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                created_by   INTEGER,
+                last_used_at INTEGER,
+                expires_at   INTEGER
+            );
         """)
         # Migrate older auth.db files (pre-email) in place.
         cols = [r[1] for r in self.db.execute("PRAGMA table_info(users)")]
@@ -523,6 +552,75 @@ class AuthManager:
                 "COLLATE NOCASE AND success = 0", (username,))
             self.db.commit()
         return True
+
+    # -- API keys ----------------------------------------------------------
+    def create_api_key(self, name, created_by=None, expires_at=None):
+        """Mint a read-only API key. Returns ``(id, raw_key)``; only the raw
+        key's hash is stored, so the caller must surface the raw key to the
+        user once — it can never be recovered afterwards."""
+        name = _validate_key_name(name)
+        if expires_at is not None:
+            expires_at = int(expires_at)
+            if expires_at <= int(time.time()):
+                raise AuthError("expiry must be in the future")
+        raw = API_KEY_PREFIX + secrets.token_urlsafe(32)
+        prefix = raw[:API_KEY_DISPLAY_LEN]
+        now = int(time.time())
+        with self.lock:
+            if (self.db.execute("SELECT COUNT(*) FROM api_keys").fetchone()[0]
+                    >= MAX_API_KEYS):
+                raise AuthError(f"too many API keys (max {MAX_API_KEYS}); "
+                                "revoke some first", code=409)
+            cur = self.db.execute(
+                "INSERT INTO api_keys (name, key_hash, prefix, created_at, "
+                "created_by, expires_at) VALUES (?,?,?,?,?,?)",
+                (name, _token_hash(raw), prefix, now, created_by, expires_at))
+            self.db.commit()
+            return cur.lastrowid, raw
+
+    def list_api_keys(self):
+        """All keys, newest first — metadata only (never the key or its hash)."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT k.id, k.name, k.prefix, k.created_at, k.last_used_at, "
+                "k.expires_at, u.username FROM api_keys k "
+                "LEFT JOIN users u ON u.id = k.created_by "
+                "ORDER BY k.id DESC").fetchall()
+        return [{"id": r[0], "name": r[1], "prefix": r[2], "created_at": r[3],
+                 "last_used_at": r[4], "expires_at": r[5],
+                 "created_by": r[6]} for r in rows]
+
+    def verify_api_key(self, raw, ip=None):
+        """Return a principal ``{"key_id", "name", "role": "api"}`` for a valid,
+        unexpired key, else ``None``. Slides ``last_used_at`` forward (throttled
+        to avoid a write per request)."""
+        if not raw or not isinstance(raw, str) \
+                or not raw.startswith(API_KEY_PREFIX):
+            return None
+        th = _token_hash(raw)
+        now = int(time.time())
+        with self.lock:
+            row = self.db.execute(
+                "SELECT id, name, expires_at, last_used_at FROM api_keys "
+                "WHERE key_hash = ?", (th,)).fetchone()
+            if not row:
+                return None
+            if row[2] is not None and row[2] < now:
+                return None
+            if row[3] is None or now - row[3] >= API_KEY_TOUCH_SEC:
+                self.db.execute(
+                    "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
+                    (now, row[0]))
+                self.db.commit()
+        return {"key_id": row[0], "name": row[1], "role": "api"}
+
+    def delete_api_key(self, key_id):
+        with self.lock:
+            cur = self.db.execute("DELETE FROM api_keys WHERE id = ?",
+                                  (key_id,))
+            if cur.rowcount == 0:
+                raise AuthError("API key not found", code=404)
+            self.db.commit()
 
     def prune(self):
         now = int(time.time())
