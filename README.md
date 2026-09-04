@@ -178,9 +178,10 @@ GUI-managed preference**. An admin opens the account menu →
 **Organize systems**, creates categories, and drags firewalls into them and
 into the order they want. It's one shared arrangement everyone sees, saved
 server-side to `LAYOUT_PATH` (default `layout.json` beside the events DB) —
-`devices.json` is never touched. Categories are collapsible on the overview,
-and any firewall not placed in a category shows under **Uncategorized**, so
-newly added devices always appear.
+`devices.json` is never touched. The grouping and order apply to both the
+overview cards (collapsible category sections) **and the top navigation
+tabs** (grouped under the same labels). Any firewall not placed in a category
+shows under **Uncategorized**, so newly added devices always appear.
 
 ## Configure the firewalls to send syslog
 
