@@ -85,18 +85,14 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .group-select:hover { border-color:var(--accent); }
 
 /* overview */
-.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:8px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:18px; }
 .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
 /* compact stat tiles: label / value / context in a tighter type scale */
 .tile { padding:9px 13px 8px; }
 .tile .l { color:var(--ink-2); font-size:12.5px; }
 .tile .v { font-size:20px; font-weight:650; line-height:1.25; margin-top:1px; }
 .tile .s { color:var(--muted); font-size:12px; margin-top:1px; }
-/* ops counters that rarely change: one muted line instead of four tiles */
-.health { display:flex; flex-wrap:wrap; gap:6px 18px; color:var(--muted); font-size:12px;
-  margin:0 2px 18px; }
-.health b { color:var(--ink-2); font-weight:600; }
-.health .warn b { color:var(--serious); }
+.tile.warn .v { color:var(--serious); }   /* dropped / unparsed above zero */
 .sys-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
 .sys-card { background:var(--surface); border:1px solid var(--border);
   border-radius:12px; padding:14px 15px; cursor:pointer; transition:border-color .1s; }
@@ -361,7 +357,6 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   <!-- Overview -->
   <div id="page-overview">
     <div class="tiles" id="tiles"></div>
-    <div class="health" id="health"></div>
     <h2 id="sysHead">Systems</h2>
     <div id="sysWrap"></div>
   </div>
@@ -874,15 +869,12 @@ function renderOverview() {
     ["Disk usage", fmtBytes(stats.db_bytes),
       stats.retention_days + "-day retention" + (stats.max_events ? " · cap " + fmtCompact(stats.max_events) : ""),
       "events database on disk, incl. WAL"],
+    ["Dropped", fmtCompact(stats.dropped), "lost to queue overflow", fmt(stats.dropped), stats.dropped > 0],
+    ["Unparsed", fmtCompact(stats.unparsed), "kept for diagnosis", fmt(stats.unparsed) + " lines didn't match a known format", stats.unparsed > 0],
   ];
-  $("tiles").innerHTML = tiles.map(([l,v,s,t]) =>
-    `<div class="card tile"${t ? ` title="${esc(t)}"` : ""}><div class="l">${esc(l)}</div>
+  $("tiles").innerHTML = tiles.map(([l,v,s,t,warn]) =>
+    `<div class="card tile${warn ? " warn" : ""}"${t ? ` title="${esc(t)}"` : ""}><div class="l">${esc(l)}</div>
      <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
-  const h = (l, v, warn, title) =>
-    `<span class="${warn ? "warn" : ""}"${title ? ` title="${esc(title)}"` : ""}>${l} <b>${v}</b></span>`;
-  $("health").innerHTML =
-    h("Dropped", fmt(stats.dropped), stats.dropped > 0, "events lost to queue overflow")
-    + h("Unparsed", fmt(stats.unparsed), stats.unparsed > 0, "lines that didn't match a known format (kept for diagnosis)");
   const groups = layoutGroups(devs);
   $("sysHead").style.display = groups ? "none" : "";   // group headers replace it
   if (!groups) {

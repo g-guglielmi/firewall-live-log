@@ -41,11 +41,10 @@ retention so you also get short-term history and CSV export.
 ## Screenshots
 
 **Overview** — fleet health at a glance: compact tiles for events and blocks
-per minute, events received, and disk usage (with the retention policy),
-then every system with its status, last-seen, a 15-minute sparkline
-(red = blocked share), and its current rate. The receiving count lives in
-the header pill; dropped/unparsed counters sit in a one-line strip that
-turns amber when non-zero.
+per minute, events received, disk usage (with the retention policy), and
+dropped/unparsed counters (amber when non-zero), then every system with its
+status, last-seen, a 15-minute sparkline (red = blocked share), and its
+current rate. The receiving count lives in the header pill.
 
 ![Overview dashboard showing six firewalls with receiving/no-data status cards](docs/overview.svg)
 
