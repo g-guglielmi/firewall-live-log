@@ -45,8 +45,9 @@ current rate, and last-seen; one tab per system.
 
 ![Overview dashboard showing six firewalls with receiving/no-data status cards](docs/overview.svg)
 
-**Per-system live log** — click a system for its own colour-coded stream
-(green = allowed, red = blocked), filterable by IP, port, and action.
+**Per-system live log** — click a system for its own stream; blocked rows
+are tinted red and NAT blue so they stand out from the (untinted) allowed
+traffic. Filter by IP, port, protocol, action, and rule.
 
 ![Per-system live log with green allowed and red blocked rows](docs/system-live.svg)
 
@@ -332,6 +333,17 @@ bounded so they stay fast regardless of database size, and the window view
 shows a *querying…* indicator while it loads. A history window shows the
 newest matches first with a **Load older** button to page further back;
 for the *complete* filtered window, use **Download CSV** (uncapped).
+Whenever the visible rows span more than the current day, a date separator
+row marks each day boundary.
+
+**Click any cell** (IP, protocol, port, action, rule) to filter by that
+value; **Shift+click** to exclude it instead. Active filters are outlined
+and the **Clear filters (n)** button shows how many are set; the **?**
+button next to it summarises the filter syntax. In live mode a green
+**Live** badge pulses; **Pause** keeps polling but parks new events and
+counts them (*Paused · 37 new*), so **Resume** catches up without losing
+anything. On phones the Proto and Rule columns are hidden and the column
+filters sit behind a **Filters** toggle.
 
 When **live** tailing with a filter, the initial backfill only looks at
 recent activity (the most recent events), then follows new matches as they

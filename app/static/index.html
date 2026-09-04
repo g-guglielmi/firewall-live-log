@@ -133,9 +133,28 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .org-chip .port { color:var(--muted); font-size:11px; }
 
 /* system live view */
-.sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+.sysbar { display:flex; align-items:center; gap:10px 14px; flex-wrap:wrap; margin-bottom:10px; }
 .sysbar .title { font-size:16px; font-weight:650; }
-.sysbar label { color:var(--ink-2); font-size:12.5px; display:inline-flex; gap:5px; align-items:center; }
+/* two clusters: who (name · status · meta) and what (live/pause · filters · csv) */
+.sys-id, .sys-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.live-ind { display:inline-flex; align-items:center; gap:7px; font-size:12px; font-weight:650;
+  color:var(--good); border:1px solid var(--good); border-radius:999px; padding:3px 10px; }
+.live-ind .pulse { width:8px; height:8px; border-radius:50%; background:var(--good);
+  animation:pulse 1.5s ease-out infinite; }
+@keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(12,163,12,.55); } 100% { box-shadow:0 0 0 7px rgba(12,163,12,0); } }
+.live-ind.paused { color:var(--warning); border-color:var(--warning); }
+.live-ind.paused .pulse { animation:none; background:var(--warning); }
+.iconbtn { width:30px; padding:6px 0; text-align:center; font-weight:650; }
+.helpwrap { position:relative; display:inline-block; }
+.help-pop { position:absolute; right:0; top:calc(100% + 8px); width:290px; z-index:40; display:none;
+  background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px;
+  box-shadow:0 10px 30px rgba(0,0,0,0.22); font-size:12.5px; line-height:1.55; }
+.help-pop.open { display:block; }
+.help-pop b { display:block; margin-bottom:4px; }
+.help-pop ul { margin:4px 0 8px; padding-left:18px; }
+.help-pop code { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace; background:var(--page);
+  border:1px solid var(--border); border-radius:5px; padding:0 5px; }
+.m-only { display:none; }
 .rangebar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px;
   padding:9px 12px; background:var(--surface); border:1px solid var(--border); border-radius:10px; }
 .rangebar label { color:var(--ink-2); font-size:12.5px; }
@@ -155,6 +174,8 @@ th { color:var(--ink-2); font-weight:600; font-size:12px; white-space:nowrap;
   font-weight:400; color:var(--ink); background:var(--page);
   border:1px solid var(--border); border-radius:6px; padding:3px 6px; }
 .colf:focus { outline:2px solid var(--accent); outline-offset:0; border-color:transparent; }
+/* a filter that's actually doing something */
+.colf.on { border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent); }
 th.num .colf { text-align:right; }
 #fSrc, #fDst, #fRule { min-width:120px; }
 /* keep Proto and Port compact instead of absorbing slack width */
@@ -162,20 +183,39 @@ th.narrow { width:1%; }
 #fProto { width:76px; }
 #fPort { width:92px; }
 td.mono,td.ip,td.port { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace; font-size:12.5px; }
+td.mono { white-space:nowrap; }
+/* click-to-filter cells */
+td[data-f] { cursor:pointer; }
+td[data-f]:hover { text-decoration:underline dotted var(--accent); text-underline-offset:3px; }
+/* day boundary marker, shown only when the visible rows span more than today */
+tr.day-sep td { background:var(--page); color:var(--ink-2); font-weight:650; font-size:12px;
+  padding:4px 9px; border-bottom:1px solid var(--grid); }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
 /* The scroll container carries the card look but NO padding: a top padding
    here would sit ABOVE the sticky header, and scrolling rows would show in
    that strip. border-radius + overflow clips the rounded corners. */
 .table-scroll { background:var(--surface); border:1px solid var(--border);
   border-radius:12px; overflow:auto; max-height:68vh; }
-tbody tr.ev-allow td { background:var(--tint-good); }
+/* Only the interesting rows get a tint: on a real firewall most traffic is
+   allowed, and a wall of green hides the blocks that matter. */
 tbody tr.ev-block td { background:var(--tint-bad); }
 tbody tr.ev-nat td { background:var(--tint-nat); }
 .badge { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
-.empty-note { color:var(--muted); padding:18px 4px; }
-.loadmore { display:none; align-items:center; justify-content:center; gap:10px;
-  margin-top:10px; }
-.loadmore .sub { color:var(--muted); font-size:12px; }
+.empty-note { color:var(--muted); padding:18px 4px; line-height:1.6; }
+.empty-note b { color:var(--ink); }
+.tablefoot { display:flex; align-items:center; gap:10px; margin-top:8px; min-height:30px; }
+.tablefoot .sub { color:var(--muted); font-size:12px; }
+
+/* phones: fewer columns, filters behind a toggle, compact toolbar */
+@media (max-width: 640px) {
+  .wrap { padding:14px 12px 40px; }
+  .m-only { display:inline-block; }
+  th:nth-child(4), td:nth-child(4), th:nth-child(7), td:nth-child(7) { display:none; }
+  body:not(.mfilt) .colf { display:none; }
+  .table-scroll { max-height:none; }
+  .sysbar .sub, .sysbar .title { font-size:14px; }
+  .tiles { grid-template-columns:repeat(2, 1fr); gap:8px; }
+}
 
 /* user menu (avatar + dropdown) + modal (auth) */
 .usermenu { position:relative; display:inline-block; }
@@ -283,15 +323,34 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   <!-- Single-system live log (reused for whichever system is selected) -->
   <div id="page-system" style="display:none">
     <div class="sysbar">
-      <button id="backBtn">← Overview</button>
-      <span class="title" id="sysTitle"></span>
-      <span class="pill" id="sysStatus"></span>
-      <span class="sub" id="sysMeta"></span>
+      <div class="sys-id">
+        <span class="title" id="sysTitle"></span>
+        <span class="pill" id="sysStatus"></span>
+        <span class="sub" id="sysMeta"></span>
+      </div>
       <span class="spacer"></span>
-      <label><input type="checkbox" id="fPause"> pause</label>
-      <button id="fClear">Clear filters</button>
-      <a class="btn" id="csvLink" href="#">Download CSV</a>
-      <span class="sub" id="meta"></span>
+      <div class="sys-actions">
+        <span class="live-ind" id="liveInd"><span class="pulse"></span>Live</span>
+        <button id="fPause" title="Pause the live tail (new events are counted, not lost)">Pause</button>
+        <button class="m-only" id="fFilt" aria-pressed="false">Filters</button>
+        <button id="fClear" style="display:none">Clear filters</button>
+        <span class="helpwrap">
+          <button class="iconbtn" id="fHelp" title="Filter syntax" aria-haspopup="true" aria-expanded="false">?</button>
+          <div class="help-pop" id="helpPop" role="dialog" aria-label="Filter syntax">
+            <b>Filter syntax</b>
+            <ul>
+              <li><code>10.0.10.</code> — substring match</li>
+              <li><code>!10.0.0.5</code> — exclude</li>
+              <li><code>44</code> — port prefix (443, 445…), <code>=80</code> exact</li>
+              <li><code>!=80</code> — exclude an exact port</li>
+            </ul>
+            <b>Shortcuts</b>
+            Click any cell to filter by its value.<br>
+            <kbd>Shift</kbd>+click to exclude it instead.
+          </div>
+        </span>
+        <a class="btn" id="csvLink" href="#">Download CSV</a>
+      </div>
     </div>
     <div class="rangebar" id="rangeBar" style="display:none">
       <label for="rFrom">From</label>
@@ -336,9 +395,11 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         <tbody></tbody>
       </table>
     </div>
-    <div class="loadmore" id="loadMoreBar">
-      <button id="loadOlderBtn">Load older</button>
+    <div class="tablefoot">
+      <span class="sub" id="meta"></span>
+      <span class="spacer"></span>
       <span class="sub" id="loadMoreNote"></span>
+      <button id="loadOlderBtn" style="display:none">Load older</button>
     </div>
   </div>
 </div>
@@ -736,18 +797,54 @@ function filterQuery() {
   for (const k in f) if (f[k]) p.set(k, f[k]);
   return p;
 }
+// Cells carry data-f (which filter) + data-v (value) so a click can filter.
 function rowHtml(e) {
-  const cls = e.action === "Allow" ? "ev-allow" : BLOCKED.has(e.action) ? "ev-block"
-    : e.action === "NAT" ? "ev-nat" : "";
+  const cls = BLOCKED.has(e.action) ? "ev-block" : e.action === "NAT" ? "ev-nat" : "";
+  const port = e.dst_port >= 0 ? `<td class="num port" data-f="port" data-v="${e.dst_port}">${e.dst_port}</td>`
+                               : `<td class="num port">—</td>`;
   return `<tr class="${cls}">
     <td class="mono">${new Date(e.ts*1000).toLocaleTimeString()}</td>
-    <td class="ip">${esc(e.src)}</td><td class="ip">${esc(e.dst)}</td>
-    <td>${esc(e.proto)}</td>
-    <td class="num port">${e.dst_port >= 0 ? e.dst_port : "—"}</td>
-    <td><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
-    <td>${esc(e.rule)}</td></tr>`;
+    <td class="ip" data-f="src" data-v="${esc(e.src)}">${esc(e.src)}</td>
+    <td class="ip" data-f="dst" data-v="${esc(e.dst)}">${esc(e.dst)}</td>
+    <td data-f="proto" data-v="${esc(e.proto)}">${esc(e.proto)}</td>
+    ${port}
+    <td data-f="act" data-v="${esc(e.action)}"><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
+    <td data-f="rule" data-v="${esc(e.rule)}">${esc(e.rule)}</td></tr>`;
+}
+function dayKey(ts) {
+  const d = new Date(ts * 1000);
+  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+}
+function fmtDay(ts) {
+  return new Date(ts * 1000).toLocaleDateString(undefined,
+    { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+}
+function activeFilterCount() {
+  return ["fSrc","fDst","fProto","fPort","fRule","fAct"].filter(id => $(id).value).length;
+}
+// Highlight filters that are set; show "Clear filters (n)" only when n > 0.
+function updateFilterUi() {
+  let n = 0;
+  ["fSrc","fDst","fProto","fPort","fRule","fAct"].forEach(id => {
+    const on = !!$(id).value; $(id).classList.toggle("on", on); if (on) n++;
+  });
+  $("fClear").style.display = n ? "" : "none";
+  $("fClear").textContent = `Clear filters (${n})`;
+}
+function emptyHtml() {
+  if (loading) return "Querying the database…";
+  if (activeFilterCount())
+    return `No events match the current filters. <button class="linkbtn" id="emptyClear">Clear filters</button>`;
+  const d = deviceByName(view), live = $("fMode").value === "live";
+  if (live && d && !d.events && !d.last_seen)
+    return `Waiting for syslog from <b>${esc(view)}</b> — nothing has arrived on
+      <b>udp/${d.port}</b> yet.<br>Point the firewall's remote-syslog target at this
+      host on port ${d.port}; events show up here within a couple of seconds.`;
+  return live ? "No events yet — new ones will appear here as they arrive."
+              : "No events in this time window.";
 }
 let loading = false, windowHasMore = false, olderInFlight = false;
+let paused = false, pending = [];    // live tail paused; events buffered meanwhile
 let customFrom = 0, customTo = null;   // epoch secs; customTo null = open to now
 function toLocalInput(sec) {
   const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
@@ -775,28 +872,63 @@ function renderLog() {
   const isLive = $("fMode").value === "live";
   const shown = isLive ? events.slice(-SHOW).reverse() : events.slice().reverse();
   $("meta").textContent = loading ? "querying…"
-    : `${shown.length} shown / ${events.length} loaded`;
+    : shown.length ? `${shown.length} shown / ${events.length} loaded` : "";
   const body = $("log").querySelector("tbody");
-  body.innerHTML = shown.length ? shown.map(rowHtml).join("")
-    : `<tr><td colspan="7" class="empty-note">${loading
-        ? "Querying the database…" : "No matching events yet."}</td></tr>`;
+  if (!shown.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty-note">${emptyHtml()}</td></tr>`;
+    return;
+  }
+  // Time-of-day alone is ambiguous once the rows span more than today, so
+  // mark each day boundary with a separator row (live tail: only at midnight).
+  const today = dayKey(Date.now() / 1000);
+  const first = dayKey(shown[0].ts), last = dayKey(shown[shown.length - 1].ts);
+  const multi = first !== last || first !== today;
+  let html = "", cur = null;
+  for (const e of shown) {
+    if (multi) {
+      const k = dayKey(e.ts);
+      if (k !== cur) { cur = k; html += `<tr class="day-sep"><td colspan="7">${fmtDay(e.ts)}</td></tr>`; }
+    }
+    html += rowHtml(e);
+  }
+  body.innerHTML = html;
 }
 function updateLoadMore() {
-  const bar = $("loadMoreBar"), btn = $("loadOlderBtn"), note = $("loadMoreNote");
-  if ($("fMode").value === "live") { bar.style.display = "none"; return; }
+  const btn = $("loadOlderBtn"), note = $("loadMoreNote");
+  if ($("fMode").value === "live") { btn.style.display = "none"; note.textContent = ""; return; }
   if (events.length >= WINDOW_MAX) {           // hit the on-screen cap
-    bar.style.display = "flex"; btn.style.display = "none";
+    btn.style.display = "none";
     note.textContent = `Showing the most recent ${WINDOW_MAX.toLocaleString()} — `
       + `narrow the filter or Download CSV for the full window.`;
   } else if (windowHasMore) {                   // more older events exist
-    bar.style.display = "flex"; btn.style.display = ""; note.textContent = "";
+    btn.style.display = ""; note.textContent = "";
   } else {
-    bar.style.display = "none";
+    btn.style.display = "none"; note.textContent = "";
   }
+}
+// Live badge + Pause/Resume. Pausing keeps polling but parks new events in
+// `pending`, so the badge can say how much arrived and nothing is lost.
+function updateLiveUi() {
+  const live = view !== "overview" && $("fMode").value === "live";
+  $("liveInd").style.display = live ? "" : "none";
+  $("fPause").style.display = live ? "" : "none";
+  $("liveInd").className = "live-ind" + (paused ? " paused" : "");
+  $("liveInd").innerHTML = `<span class="pulse"></span>` + (paused
+    ? "Paused" + (pending.length ? ` · ${fmt(pending.length)} new` : "") : "Live");
+  $("fPause").textContent = paused ? "Resume" : "Pause";
+}
+function setPaused(on) {
+  paused = on;
+  if (!on && pending.length) {
+    events.push(...pending); pending = [];
+    if (events.length > KEEP) events = events.slice(-KEEP);
+    renderLog();
+  }
+  updateLiveUi();
 }
 let liveInFlight = false;
 async function pollLive() {
-  if (view === "overview" || $("fMode").value !== "live" || $("fPause").checked) return;
+  if (view === "overview" || $("fMode").value !== "live") return;
   // Single-flight: never let the 2s timer stack a second request on top of
   // one that hasn't returned, or slow polls would pile up on the server.
   if (liveInFlight) return;
@@ -808,12 +940,18 @@ async function pollLive() {
     const res = await r.json();
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
-    if (res.cursor < cursor) events = [];   // db pruned / restarted
+    if (res.cursor < cursor) { events = []; pending = []; }   // db pruned / restarted
     cursor = res.cursor;
     if (res.events.length) {
-      events.push(...res.events);
-      if (events.length > KEEP) events = events.slice(-KEEP);
-      renderLog();
+      if (paused) {
+        pending.push(...res.events);
+        if (pending.length > KEEP) pending = pending.slice(-KEEP);
+        updateLiveUi();
+      } else {
+        events.push(...res.events);
+        if (events.length > KEEP) events = events.slice(-KEEP);
+        renderLog();
+      }
     }
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
@@ -867,9 +1005,11 @@ function refetchSystem() {
                              // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
   windowHasMore = false;
+  paused = false; pending = [];   // a new query invalidates anything parked
   // Historical-window queries can take a moment on a big DB — show a
   // "querying…" state instead of a misleading "no events" while it runs.
   loading = ($("fMode").value !== "live");
+  updateFilterUi(); updateLiveUi();
   renderLog();   // clear the table now — an empty device gets no later render
   updateLoadMore();
   const p = filterQuery(); applyWindow(p);
@@ -929,7 +1069,6 @@ function go(target, opts) {
     $("fPort").value = (st && st.port) || "";
     $("fRule").value = (st && st.rule) || "";
     $("fAct").value = (st && st.act) || "";
-    $("fPause").checked = false;
     const mode = (st && st.mode) || "live";
     $("fMode").value = mode;
     if (mode === "custom") {
@@ -980,7 +1119,13 @@ async function loadStats() {
     const s = await r.json();
     stats = s;
     renderTabs(); renderFleetPill();
-    if (view === "overview") renderOverview(); else setSysHeader();
+    if (view === "overview") renderOverview();
+    else {
+      setSysHeader();
+      // The empty-state text depends on device stats (never seen vs. quiet),
+      // which may not have been loaded when the view first rendered.
+      if (!events.length && !loading) renderLog();
+    }
     $("updated").textContent = "updated " + new Date().toLocaleTimeString();
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
@@ -991,7 +1136,7 @@ async function loadStats() {
 function refilter() { refetchSystem(); syncUrl(false); }
 $("fMode").addEventListener("change", () => {
   const m = $("fMode").value;
-  if (m === "custom") { setLiveTimer(false); showRangeBar(); return; }  // waits for Apply
+  if (m === "custom") { setLiveTimer(false); updateLiveUi(); showRangeBar(); return; }  // waits for Apply
   $("rangeBar").style.display = "none";
   setLiveTimer(m === "live");
   refilter();
@@ -1026,12 +1171,43 @@ $("rNow").addEventListener("click",
   e => { if (e.key === "Enter") applyRange(); }));
 ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refilter, 350)));
 $("fAct").addEventListener("change", refilter);
-$("fPause").addEventListener("change", () => { if (!$("fPause").checked) pollLive(); });
+$("fPause").addEventListener("click", () => setPaused(!paused));
 $("fClear").addEventListener("click", () => {
   ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refilter();
 });
 $("loadOlderBtn").addEventListener("click", loadOlder);
-$("backBtn").addEventListener("click", () => go("overview"));
+// Click a cell → filter by its value; Shift+click → exclude it. Ignore clicks
+// that were really a text selection.
+const FILTER_INPUT = { src: "fSrc", dst: "fDst", proto: "fProto", rule: "fRule" };
+$("log").querySelector("tbody").addEventListener("click", e => {
+  if (e.target.id === "emptyClear") { $("fClear").click(); return; }
+  const td = e.target.closest("td[data-f]");
+  if (!td || String(window.getSelection()).length) return;
+  const f = td.dataset.f, v = td.dataset.v, ex = e.shiftKey;
+  if (f === "act") {
+    if (ex) return;                          // the Action select has no exclude
+    $("fAct").value = v === "Allow" ? "Allow" : BLOCKED.has(v) ? "blocked" : v === "NAT" ? "NAT" : "";
+  } else if (f === "port") {
+    $("fPort").value = (ex ? "!" : "") + "=" + v;
+  } else {
+    $(FILTER_INPUT[f]).value = (ex ? "!" : "") + v;
+  }
+  refilter();
+});
+// Filter-syntax popover
+function toggleHelp(open) {
+  const p = $("helpPop");
+  const show = open === undefined ? !p.classList.contains("open") : open;
+  p.classList.toggle("open", show);
+  $("fHelp").setAttribute("aria-expanded", show ? "true" : "false");
+}
+$("fHelp").addEventListener("click", e => { e.stopPropagation(); toggleHelp(); });
+document.addEventListener("click", e => { if (!$("helpPop").contains(e.target)) toggleHelp(false); });
+// Phones hide the per-column filters behind this toggle.
+$("fFilt").addEventListener("click", () => {
+  const on = document.body.classList.toggle("mfilt");
+  $("fFilt").setAttribute("aria-pressed", on ? "true" : "false");
+});
 function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }
 
 /* ---------------- Auth UI ---------------- */
@@ -1060,7 +1236,7 @@ document.addEventListener("click", (e) => {
   if (!$("userbar").contains(e.target)) toggleUserMenu(false);
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") toggleUserMenu(false);
+  if (e.key === "Escape") { toggleUserMenu(false); toggleHelp(false); }
 });
 $("emailBtn").addEventListener("click", setMyEmail);
 $("pwBtn").addEventListener("click", () => openPw(false));
