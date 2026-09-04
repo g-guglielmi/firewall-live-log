@@ -309,6 +309,37 @@ def main():
     check("auto-detect: sophos on mixed port",
           len(by(device="Mixed-Auto", vendor="sophos")) == 1)
 
+    print("== geoip country annotation ==")
+    # Public dst 93.184.216.34 (US) is annotated; private src 10.0.10.5 is not.
+    allow = by(device="UDM-Test", action="Allow", dst_port=443)
+    check("public dst gets a country code",
+          all(e.get("dst_cc") == "us" for e in allow), str(allow[:1]))
+    check("private src gets no country code",
+          all("src_cc" not in e for e in allow), str(allow[:1]))
+    # Sophos public dst 8.8.8.8 -> US.
+    check("public dst 8.8.8.8 -> us",
+          all(e.get("dst_cc") == "us"
+              for e in by(device="Sophos-Test", action="Allow", dst_port=443)),
+          "")
+    # A reserved/documentation public-looking dst (203.0.113.0/24, RFC5737)
+    # is correctly left unannotated.
+    check("reserved 203.0.113.x dst not annotated",
+          all("dst_cc" not in e for e in by(device="UDM-Test", action="NAT")),
+          "")
+    # Flag asset + names served and bad names rejected. (api_get returns the
+    # raw response bytes, which request() does not.)
+    code, _, body = api_get("/flags/us.svg", None)
+    check("flag svg served", code == 200 and b"<svg" in body, str(code))
+    code, names, _ = api_get("/flags/names.json", None)
+    check("flag names served", code == 200 and isinstance(names, dict)
+          and names.get("us", "").startswith("United States"),
+          str(names.get("us") if isinstance(names, dict) else names))
+    # Only /[a-z]{2}\.svg/ reaches a file; anything else under /flags/ is 404.
+    code, _, _ = api_get("/flags/index.svg", None)    # 5 letters, not a CC
+    code2, _, _ = api_get("/flags/us.png", None)      # wrong extension
+    check("flag route rejects non-CC names", code == 404 and code2 == 404,
+          f"{code},{code2}")
+
     print("== filters ==")
     f = get_json("/api/live?since=0&vendor=sophos")
     # 25 on Sophos-Test + 1 auto-detected on Mixed-Auto = 26.

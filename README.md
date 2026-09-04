@@ -26,6 +26,8 @@ retention so you also get short-term history and CSV export.
 - **One UDP port per device**, each labelled with a friendly name and
   vendor in a small JSON config.
 - **Auto-detects UniFi vs Sophos** from the log format; override per port.
+- **Country flag** next to each public source/destination IP, from a local
+  IP→country table (no external lookups).
 - **Filter** each system's log by source/destination IP (substring) and
   port — live or over a historical window.
 - **Retention** (default 14 days) with an optional row-count safety cap;
@@ -294,7 +296,9 @@ of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
 ```
 
 - **`GET /api/events`** → `{"events": [ … ]}`, newest-first. Page further back
-  with `before=<id>` (returns only events with a smaller id).
+  with `before=<id>` (returns only events with a smaller id). Each event whose
+  `src`/`dst` is a public address also carries `src_cc`/`dst_cc`, a lowercase
+  ISO-3166 country code (absent for private/reserved addresses).
 - **`GET /api/live?since=<cursor>`** → `{"cursor": <id>, "events": [ … ]}`,
   oldest-first. Poll by passing the previous response's `cursor` back as
   `since`; `since=0` backfills recent activity. Empty poll returns the same
@@ -556,6 +560,35 @@ completely open.
   can only send to 514, remap it on the host (e.g. a `PREROUTING` DNAT to
   a high port) rather than running the container as root.
 
+## Country flags
+
+Every public source/destination IP in the log gets a small country flag, all
+resolved **locally** — the collector never calls a geolocation API, so it
+keeps working offline and no observed IP ever leaves the host. Private,
+CGNAT, loopback, and reserved/documentation addresses get no flag.
+
+The lookup tables (IPv4 + IPv6) and the flag artwork are compiled from public
+sources and committed to the repo, so the container ships with them and needs
+no build-time or run-time network:
+
+- **IP → country** ranges come from the **RIR delegation files** (AFRINIC,
+  APNIC, ARIN, LACNIC, RIPE NCC) — country-level, ~330k ranges, ~1.9 MB
+  gzipped. Accuracy is the registrant's country, which is what you want for
+  "roughly where is this address", not street-level geolocation.
+- **Flag SVGs** and their country names come from
+  [flag-icons](https://github.com/lipis/flag-icons) (MIT).
+
+To refresh the data (the RIRs update daily; quarterly is plenty):
+
+```sh
+python3 scripts/build_geo.py     # stdlib only; rewrites app/geo/ + app/static/flags/
+```
+
+Lookups are an `O(log n)` bisect over the sorted ranges and the table loads
+lazily on first use, so idle installs pay nothing.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) · bundled flag artwork from
+[flag-icons](https://github.com/lipis/flag-icons) (MIT); IP allocation data
+from the Regional Internet Registries (public).

@@ -210,6 +210,9 @@ td.mono { white-space:nowrap; }
 /* click-to-filter cells */
 td[data-f] { cursor:pointer; }
 td[data-f]:hover { text-decoration:underline dotted var(--accent); text-underline-offset:3px; }
+/* country flag after a public IP */
+.flag { width:15px; height:11px; border-radius:2px; margin-left:6px;
+  vertical-align:baseline; box-shadow:0 0 0 1px var(--border); }
 /* day boundary marker, shown only when the visible rows span more than today */
 tr.day-sep td { background:var(--page); color:var(--ink-2); font-weight:650; font-size:12px;
   padding:4px 9px; border-bottom:1px solid var(--grid); }
@@ -988,12 +991,20 @@ function rowHtml(e) {
                                : `<td class="num port">—</td>`;
   return `<tr class="${cls}">
     <td class="mono">${new Date(e.ts*1000).toLocaleTimeString()}</td>
-    <td class="ip" data-f="src" data-v="${esc(e.src)}">${esc(e.src)}</td>
-    <td class="ip" data-f="dst" data-v="${esc(e.dst)}">${esc(e.dst)}</td>
+    <td class="ip" data-f="src" data-v="${esc(e.src)}">${esc(e.src)}${flagHtml(e.src_cc)}</td>
+    <td class="ip" data-f="dst" data-v="${esc(e.dst)}">${esc(e.dst)}${flagHtml(e.dst_cc)}</td>
     <td data-f="proto" data-v="${esc(e.proto)}">${esc(e.proto)}</td>
     ${port}
     <td data-f="act" data-v="${esc(e.action)}"><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
     <td data-f="rule" data-v="${esc(e.rule)}">${esc(e.rule)}</td></tr>`;
+}
+// Country flag for a public IP (src_cc/dst_cc set by the server). Rendered
+// only for codes we ship a flag + name for, so there's never a broken image.
+let countryNames = {};
+function flagHtml(cc) {
+  if (!cc || !countryNames[cc]) return "";
+  return ` <img class="flag" src="/flags/${cc}.svg" alt="${esc(cc.toUpperCase())}"`
+    + ` title="${esc(countryNames[cc])}" loading="lazy">`;
 }
 function dayKey(ts) {
   const d = new Date(ts * 1000);
@@ -1864,6 +1875,11 @@ $("logoutBtn").addEventListener("click", async () => {
 
 loadMe();
 loadStats();
+// Country names for flag tooltips; re-render the log once they land so flags
+// on an already-painted table appear.
+fetch("/flags/names.json").then(r => r.ok ? r.json() : {}).then(m => {
+  countryNames = m; if (view !== "overview") renderLog();
+}).catch(() => {});
 fetchLayout();           // overview grouping/order (re-renders when it lands)
 setInterval(loadStats, 5000);
 restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)

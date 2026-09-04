@@ -14,6 +14,7 @@ for deployments that already sit behind an authenticating reverse proxy.
 import http.cookies
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -21,6 +22,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import auth as auth_mod
+import geo as geo_mod
 import mailer as mailer_mod
 import store
 
@@ -306,6 +308,19 @@ class Handler(BaseHTTPRequestHandler):
         html = html.replace("__CSP_NONCE__", nonce)
         self._send(200, html, "text/html; charset=utf-8", csp_nonce=nonce)
 
+    _FLAG_DIR = os.path.join(_STATIC_DIR, "flags")
+
+    def _serve_flag_asset(self, name, content_type):
+        # `name` is already validated by the caller (fixed string or /[a-z]{2}\.svg/).
+        try:
+            with open(os.path.join(self._FLAG_DIR, name), "rb") as f:
+                body = f.read()
+        except OSError:
+            self._json({"error": "not found"}, 404)
+            return
+        self._send(200, body, content_type,
+                   {"Cache-Control": "public, max-age=604800"})
+
     # -- auth helpers ------------------------------------------------------
     def _client_ip(self):
         xff = self.headers.get("X-Forwarded-For")
@@ -411,6 +426,18 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, f.read(), "image/png",
                                {"Cache-Control": "public, max-age=86400"})
                 return
+            # Country flags for the log view. Public, immutable assets; the
+            # country code is validated so the path can't escape the dir.
+            if path == "/flags/names.json":
+                self._serve_flag_asset("names.json", "application/json")
+                return
+            if path.startswith("/flags/"):
+                cc = path[len("/flags/"):]
+                if re.fullmatch(r"[a-z]{2}\.svg", cc):
+                    self._serve_flag_asset(cc, "image/svg+xml")
+                else:
+                    self._json({"error": "not found"}, 404)
+                return
 
             authed = self.current_user()
             if authed:
@@ -470,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 cursor, events = self.state.query(
                     lambda db: store.query_live(db, since, filters, limit))
-                self._json({"cursor": cursor, "events": events})
+                self._json({"cursor": cursor, "events": geo_mod.annotate(events)})
                 return
             if path == "/api/events":
                 try:
@@ -484,7 +511,7 @@ class Handler(BaseHTTPRequestHandler):
                 events = self.state.query(
                     lambda db: store.query_range(db, start_ts, end_ts, filters,
                                                  limit, before=before))
-                self._json({"events": events})
+                self._json({"events": geo_mod.annotate(events)})
                 return
             if path == "/api/events.csv":
                 try:

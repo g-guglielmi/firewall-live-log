@@ -1,1 +1,5 @@
-* text=auto eol=lf
+# Compiled geo tables are binary — never normalize line endings.
+*.gz binary
+*.bin binary
+# Vendored flag SVGs: keep as-is, don't CRLF-mangle.
+app/static/flags/*.svg -text
