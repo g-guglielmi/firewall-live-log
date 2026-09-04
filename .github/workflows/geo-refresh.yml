@@ -1,0 +1,125 @@
+name: Refresh geo data
+
+# Quarterly (and on demand) rebuild of the IP->country tables and flag
+# artwork from their upstream sources. When the compiled data actually
+# changes, this commits it, bumps a patch version, and builds + publishes the
+# image (including :latest) itself — so it never depends on a tag push
+# triggering release.yml (GITHUB_TOKEN pushes don't start other workflows).
+#
+# build_geo.py is deterministic, so a run with no upstream change produces
+# byte-identical output and does nothing.
+
+on:
+  schedule:
+    - cron: "0 4 1 1,4,7,10 *" # 04:00 UTC, 1st of Jan/Apr/Jul/Oct
+  workflow_dispatch: {} # "Run workflow" button for an immediate refresh
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: geo-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags to compute the next version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Rebuild geo tables + flags
+        run: python3 scripts/build_geo.py
+
+      - name: Detect a real data change
+        id: build
+        run: |
+          if git diff --quiet -- app/geo app/static/flags; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream change — nothing to publish."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- app/geo app/static/flags
+          fi
+
+      - name: End-to-end test harness (release gate)
+        if: steps.build.outputs.changed == 'true'
+        run: python3 test_harness.py
+
+      - name: Compute next patch version
+        if: steps.build.outputs.changed == 'true'
+        id: ver
+        run: |
+          latest=$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
+          latest=${latest:-v0.0.0}
+          ver=${latest#v}
+          major=${ver%%.*}; rest=${ver#*.}; minor=${rest%%.*}; patch=${rest#*.}
+          next="v$major.$minor.$((patch + 1))"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+          echo "version=${next#v}" >> "$GITHUB_OUTPUT"
+          echo "Next version: $next (was $latest)"
+
+      - name: Commit refreshed data
+        if: steps.build.outputs.changed == 'true'
+        run: |
+          git config user.name  "g-guglielmi"
+          git config user.email "g-guglielmi@users.noreply.github.com"
+          git add app/geo app/static/flags
+          git commit -m "chore(geo): refresh IP->country data (${{ steps.ver.outputs.tag }})"
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.build.outputs.changed == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.build.outputs.changed == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.build.outputs.changed == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        if: steps.build.outputs.changed == 'true'
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.tag }}
+            type=raw,value=${{ steps.ver.outputs.version }}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        if: steps.build.outputs.changed == 'true'
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Push commit + tag and create the release
+        if: steps.build.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          git push origin HEAD:main
+          git push origin "$TAG"
+          {
+            echo "## Changes"
+            echo "- Refreshed IP->country tables and flag artwork from upstream (automated)."
+            echo
+            echo "Counts: $(python3 -c "import json;m=json.load(open('app/geo/meta.json'));print(m['ipv4_ranges'],'IPv4 +',m['ipv6_ranges'],'IPv6 ranges,',m['countries'],'countries')")"
+            echo
+            echo "**Image**: \`ghcr.io/$GITHUB_REPOSITORY:$TAG\` (linux/amd64, linux/arm64)"
+          } > /tmp/notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" --notes-file /tmp/notes.md --verify-tag

@@ -16,7 +16,7 @@ Outputs (committed):
 
   * app/geo/ip4.bin.gz   — sorted IPv4 ranges,  record = >IIH-ish (see below)
   * app/geo/ip6.bin.gz   — sorted IPv6 ranges
-  * app/geo/meta.json    — build date + row counts (informational)
+  * app/geo/meta.json    — row counts + provenance (informational)
   * app/static/flags/<cc>.svg      — one flag per country we can place
   * app/static/flags/names.json    — { "us": "United States", ... }
 
@@ -36,7 +36,6 @@ import re
 import struct
 import sys
 import tarfile
-import time
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,8 +118,12 @@ def write_v6(ranges):
 
 def _write_gz(path, raw):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with gzip.open(path, "wb", compresslevel=9) as f:
-        f.write(raw)
+    # Deterministic gzip: no embedded mtime/filename, so identical input yields
+    # byte-identical output. That's what lets the scheduled refresh detect a
+    # real data change (vs. rewriting the same bytes every run).
+    with open(path, "wb") as out:
+        with gzip.GzipFile(fileobj=out, mode="wb", compresslevel=9, mtime=0) as gz:
+            gz.write(raw)
     print("  wrote %s (%d KB)" % (path, os.path.getsize(path) // 1024))
 
 
@@ -176,8 +179,12 @@ def main():
     v6 = [r for r in v6 if r[2] in have]
     n4 = write_v4(v4)
     n6 = write_v6(v6)
+    # No build date here — the output stays byte-reproducible so the scheduled
+    # refresh only commits on a real data change (the commit date is the record
+    # of when it ran). Source + tool versions make the provenance clear.
     with open(os.path.join(GEO_DIR, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"built": time.strftime("%Y-%m-%d"),
+        json.dump({"source": "RIR delegated-extended files",
+                   "flags": "flag-icons 7.2.3 (MIT)",
                    "ipv4_ranges": n4, "ipv6_ranges": n6,
                    "countries": len(have)}, f, indent=2)
     print("done: %d ipv4 + %d ipv6 ranges, %d flags" % (n4, n6, len(have)))

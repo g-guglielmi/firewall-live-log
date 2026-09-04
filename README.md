@@ -578,7 +578,13 @@ no build-time or run-time network:
 - **Flag SVGs** and their country names come from
   [flag-icons](https://github.com/lipis/flag-icons) (MIT).
 
-To refresh the data (the RIRs update daily; quarterly is plenty):
+Refreshing is **automated**: a scheduled GitHub Action
+([`geo-refresh.yml`](.github/workflows/geo-refresh.yml)) rebuilds the tables
+quarterly, and *only when the upstream data actually changed* commits them,
+bumps a patch version, and publishes a new image (including `:latest`) — so a
+running deployment picks up fresh flags on its next `docker pull`. The build
+is byte-reproducible, so an unchanged quarter is a no-op. Trigger it manually
+any time from the Actions tab ("Run workflow"), or run it locally:
 
 ```sh
 python3 scripts/build_geo.py     # stdlib only; rewrites app/geo/ + app/static/flags/
