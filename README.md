@@ -352,6 +352,13 @@ counts them (*Paused · 37 new*), so **Resume** catches up without losing
 anything. On phones the Proto and Rule columns are hidden and the column
 filters sit behind a **Filters** toggle.
 
+The avatar menu has a **Theme** switch (Auto / Light / Dark; Auto follows
+the operating system). The choice is remembered per browser and also
+applies to the sign-in pages. If the dashboard loses contact with the
+server (restart, VPN drop) the header shows *reconnecting…* until polling
+succeeds again; the red error banner is reserved for real API errors.
+Every dialog closes with **Esc** and keeps keyboard focus inside it.
+
 When **live** tailing with a filter, the initial backfill only looks at
 recent activity (the most recent events), then follows new matches as they
 arrive — so a selective filter stays fast on a large database. To search

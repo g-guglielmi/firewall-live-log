@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Firewall Live Log</title>
 <link rel="icon" type="image/png" href="/favicon.png">
+<script>
+// Apply the saved theme before first paint so there's no flash. No attribute
+// means "follow the system" (the prefers-color-scheme block below).
+try { const t = localStorage.getItem("fll.theme");
+  if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <style>
 :root {
   color-scheme: light;
@@ -43,7 +49,9 @@ body { margin:0; background:var(--page); color:var(--ink);
 header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
 h1 { font-size:18px; margin:0; font-weight:650; }
 h2 { font-size:14px; font-weight:650; margin:22px 0 10px; }
+.logo { width:22px; height:22px; align-self:center; margin-right:-4px; }
 .sub { color:var(--muted); font-size:12.5px; }
+.sub.warn { color:var(--warning); font-weight:600; }
 .spacer { flex:1; }
 button,.btn { font:inherit; color:var(--ink); background:var(--surface);
   border:1px solid var(--border); border-radius:8px; padding:6px 12px;
@@ -130,7 +138,9 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .org-cat.uncat { background:transparent; border-style:dashed; }
 .org-cat-head { display:flex; align-items:center; gap:6px; padding:7px 9px; border-bottom:1px solid var(--grid); }
 .org-cat.uncat .org-cat-head { border-bottom:0; }
-.org-cat-name { font-weight:650; font-size:13px; flex:1; }
+.org-cat-name { font-weight:650; font-size:13px; flex:1; cursor:text; }
+.org-rename { flex:1; font:inherit; font-weight:650; font-size:13px; padding:2px 6px; margin:-3px 0;
+  border:1px solid var(--accent); border-radius:6px; background:var(--surface); color:var(--ink); }
 .org-tools { display:flex; gap:2px; }
 .org-tools button { background:none; border:1px solid transparent; border-radius:6px;
   padding:2px 6px; color:var(--muted); cursor:pointer; font:inherit; font-size:13px; line-height:1; }
@@ -256,6 +266,13 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   cursor:pointer; }
 .menu-item:hover { background:var(--page); border:0; }
 .menu-item.danger { color:var(--critical); }
+.menu-theme { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:6px 11px; font-size:12.5px; color:var(--ink-2); }
+.seg { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.seg button { border:0; border-radius:0; padding:4px 10px; font-size:12px; background:none; color:var(--ink-2); }
+.seg button + button { border-left:1px solid var(--border); }
+.seg button:hover { color:var(--ink); border-color:var(--border); }
+.seg button.on { background:var(--accent); color:#fff; }
 .linkbtn { background:none; border:0; padding:0; color:var(--accent);
   cursor:pointer; font:inherit; }
 .linkbtn:hover { text-decoration:underline; }
@@ -274,6 +291,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 .modal .row2 > div { flex:1; min-width:140px; }
 .modal .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
 .modal button.primary { color:#fff; background:var(--accent); border:0; }
+.modal button.primary.danger { background:var(--critical); }
+.modal-back.stacked { z-index:70; }   /* confirm / prompt above a management modal */
 .modal .msg { display:none; margin-top:12px; padding:8px 11px; border-radius:9px;
   background:var(--tint-bad); border:1px solid var(--critical); font-size:12.5px; }
 .modal .msg.ok { background:var(--tint-good); border-color:var(--good); }
@@ -297,6 +316,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 <body>
 <div class="wrap">
   <header>
+    <img class="logo" src="/favicon.png" alt="">
     <h1>Firewall Live Log</h1>
     <span class="sub" id="updated">loading…</span>
     <span class="spacer"></span>
@@ -319,6 +339,14 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         <button class="menu-item" id="orgBtn" role="menuitem" style="display:none">Organize systems</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
+        <div class="menu-sep"></div>
+        <div class="menu-theme">Theme
+          <span class="seg" id="themeSeg" role="group" aria-label="Theme">
+            <button type="button" data-theme="system">Auto</button>
+            <button type="button" data-theme="light">Light</button>
+            <button type="button" data-theme="dark">Dark</button>
+          </span>
+        </div>
         <div class="menu-sep"></div>
         <button class="menu-item danger" id="logoutBtn" role="menuitem">Log out</button>
       </div>
@@ -422,8 +450,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 
 <!-- Change-password modal -->
 <div class="modal-back" id="pwModal">
-  <div class="modal">
-    <h3>Change your password</h3>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pwTitle">
+    <h3 id="pwTitle">Change your password</h3>
     <div class="sub">You'll be signed out and asked to log in again.</div>
     <label for="pwCur">Current password</label>
     <input id="pwCur" type="password" autocomplete="current-password" maxlength="1024">
@@ -441,8 +469,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 
 <!-- User-management modal (admin) -->
 <div class="modal-back" id="usersModal">
-  <div class="modal">
-    <h3>Users</h3>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="usersTitle">
+    <h3 id="usersTitle">Users</h3>
     <div class="sub">Create and remove dashboard accounts.</div>
     <table class="utable"><tbody id="userRows"></tbody></table>
     <h3 style="margin-top:18px;font-size:14px">Add a user</h3>
@@ -473,8 +501,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 
 <!-- API-key management modal (admin) -->
 <div class="modal-back" id="keysModal">
-  <div class="modal">
-    <h3>API keys</h3>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="keysTitle">
+    <h3 id="keysTitle">API keys</h3>
     <div class="sub">Read-only bearer tokens so external tools can pull logs
       via the API. A key can read events, the live tail, stats and the device
       list — it can never manage users, keys, or anything else.</div>
@@ -515,12 +543,13 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 
 <!-- Organize-systems modal (admin) -->
 <div class="modal-back" id="orgModal">
-  <div class="modal" style="max-width:620px">
-    <h3>Organize systems</h3>
+  <div class="modal" style="max-width:620px" role="dialog" aria-modal="true" aria-labelledby="orgTitle">
+    <h3 id="orgTitle">Organize systems</h3>
     <div class="sub">Group your firewalls into categories and drag them into the
-      order you want on the Overview. This is display-only — it never touches
-      your <code>devices.json</code>, so keep that in any order (e.g. by UDP
-      port). Everyone sees the same arrangement.</div>
+      order you want on the Overview. Double-click a category name to rename
+      it. This is display-only — it never touches your <code>devices.json</code>,
+      so keep that in any order (e.g. by UDP port). Everyone sees the same
+      arrangement.</div>
     <div class="org-add">
       <input id="orgNewCat" type="text" maxlength="64" autocomplete="off"
              placeholder="New category name (e.g. Core network)">
@@ -531,6 +560,31 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     <div class="actions">
       <button id="orgClose">Cancel</button>
       <button class="primary" id="orgSave">Save layout</button>
+    </div>
+  </div>
+</div>
+
+<!-- Styled replacements for window.confirm / window.prompt -->
+<div class="modal-back stacked" id="confirmModal">
+  <div class="modal" style="max-width:420px" role="alertdialog" aria-modal="true"
+       aria-labelledby="confirmTitle" aria-describedby="confirmText">
+    <h3 id="confirmTitle"></h3>
+    <div class="sub" id="confirmText"></div>
+    <div class="actions">
+      <button id="confirmCancel">Cancel</button>
+      <button class="primary" id="confirmOk">OK</button>
+    </div>
+  </div>
+</div>
+<div class="modal-back stacked" id="promptModal">
+  <div class="modal" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+    <h3 id="promptTitle"></h3>
+    <div class="sub" id="promptText"></div>
+    <label for="promptInput" id="promptLabel"></label>
+    <input id="promptInput" type="text" maxlength="254" autocomplete="off">
+    <div class="actions">
+      <button id="promptCancel">Cancel</button>
+      <button class="primary" id="promptOk">Save</button>
     </div>
   </div>
 </div>
@@ -606,8 +660,97 @@ function toggleUserMenu(open) {
   m.classList.toggle("open", show);
   $("userMenuBtn").setAttribute("aria-expanded", show ? "true" : "false");
 }
+/* Theme: "system" (no attribute → prefers-color-scheme), "light" or "dark". */
+function applyTheme(t) {
+  if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
+  else { t = "system"; delete document.documentElement.dataset.theme; }
+  try { t === "system" ? localStorage.removeItem("fll.theme") : localStorage.setItem("fll.theme", t); } catch (e) {}
+  $("themeSeg").querySelectorAll("button").forEach(b => {
+    const on = b.dataset.theme === t;
+    b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+$("themeSeg").querySelectorAll("button").forEach(b =>
+  b.addEventListener("click", () => applyTheme(b.dataset.theme)));
+applyTheme((() => { try { return localStorage.getItem("fll.theme") || "system"; } catch (e) { return "system"; } })());
+
+/* Modals: one open/close path so Escape, focus and stacking behave the same
+   everywhere. `openModals` is a stack; Escape closes the top one. */
+const openModals = [];
+function openModal(id, focusEl) {
+  const m = $(id);
+  m.classList.add("open");
+  if (!openModals.includes(id)) openModals.push(id);
+  const f = focusEl || m.querySelector("input:not([type=hidden]):not([disabled]), select, button.primary, button");
+  if (f) setTimeout(() => f.focus(), 0);
+}
+function closeModal(id) {
+  $(id).classList.remove("open");
+  const i = openModals.indexOf(id);
+  if (i >= 0) openModals.splice(i, 1);
+}
+function topModal() { return openModals[openModals.length - 1]; }
+// Styled stand-ins for window.confirm / window.prompt (both return Promises).
+let confirmResolve = null, promptResolve = null;
+function confirmDialog(title, text, okLabel, danger) {
+  return new Promise(resolve => {
+    confirmResolve = resolve;
+    $("confirmTitle").textContent = title; $("confirmText").textContent = text;
+    const ok = $("confirmOk");
+    ok.textContent = okLabel || "OK"; ok.classList.toggle("danger", !!danger);
+    openModal("confirmModal", ok);
+  });
+}
+function settleConfirm(v) {
+  if (!confirmResolve) return;
+  const r = confirmResolve; confirmResolve = null;
+  closeModal("confirmModal"); r(v);
+}
+function promptDialog(title, text, label, value, type) {
+  return new Promise(resolve => {
+    promptResolve = resolve;
+    $("promptTitle").textContent = title; $("promptText").textContent = text || "";
+    $("promptLabel").textContent = label;
+    const inp = $("promptInput"); inp.type = type || "text"; inp.value = value || "";
+    openModal("promptModal", inp);
+    setTimeout(() => inp.select(), 0);
+  });
+}
+function settlePrompt(v) {
+  if (!promptResolve) return;
+  const r = promptResolve; promptResolve = null;
+  closeModal("promptModal"); r(v);
+}
+$("confirmOk").addEventListener("click", () => settleConfirm(true));
+$("confirmCancel").addEventListener("click", () => settleConfirm(false));
+$("promptOk").addEventListener("click", () => settlePrompt($("promptInput").value));
+$("promptCancel").addEventListener("click", () => settlePrompt(null));
+$("promptInput").addEventListener("keydown", e => { if (e.key === "Enter") settlePrompt($("promptInput").value); });
+// Escape closes the top modal (a forced password change can't be dismissed);
+// Tab is trapped inside it.
+function escapeModal() {
+  const t = topModal();
+  if (!t) return false;
+  if (t === "confirmModal") settleConfirm(false);
+  else if (t === "promptModal") settlePrompt(null);
+  else if (t === "pwModal") { if (pwForced) return true; closeModal(t); }
+  else closeModal(t);
+  return true;
+}
+function trapTab(e) {
+  const t = topModal();
+  if (!t) return;
+  const f = [...$(t).querySelectorAll("input, select, button, a[href], [tabindex]")]
+    .filter(el => !el.disabled && el.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1], cur = document.activeElement;
+  if (e.shiftKey && cur === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+  else if (!$(t).contains(cur)) { e.preventDefault(); first.focus(); }
+}
 async function setMyEmail() {
-  const email = window.prompt("Your email (used for password reset; blank to clear):", me && me.email ? me.email : "");
+  const email = await promptDialog("Your email", "Used for self-service password reset. Leave blank to clear it.",
+    "Email address", me && me.email ? me.email : "", "email");
   if (email === null) return;
   const res = await apiSend("POST", "/api/users/set_email",
     { id: me.id, email: email.trim() });
@@ -1147,7 +1290,21 @@ function updateSysStatus() {
   $("sysStatus").innerHTML = `<span class="dot s-${st.cls}"></span>${st.label}`;
 }
 
+// fetch() rejects with a TypeError when the server can't be reached at all —
+// a restart, a dropped VPN. That's shown as "reconnecting…" in the header
+// rather than the red banner, which is reserved for real API errors.
+const isNetErr = e => e instanceof TypeError;
+function netState(ok) {
+  const u = $("updated");
+  if (ok) {
+    u.textContent = "live"; u.className = "sub";
+    u.title = "last update " + new Date().toLocaleTimeString();
+  } else {
+    u.textContent = "reconnecting…"; u.className = "sub warn"; u.title = "";
+  }
+}
 function showError(e) {
+  if (isNetErr(e)) { netState(false); return; }
   $("banner").textContent = "Error: " + e.message;
   $("banner").style.display = "block";
 }
@@ -1165,7 +1322,7 @@ async function loadStats() {
       // which may not have been loaded when the view first rendered.
       if (!events.length && !loading) renderLog();
     }
-    $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+    netState(true);
     $("banner").style.display = "none";
   } catch (e) { showError(e); }
 }
@@ -1261,9 +1418,9 @@ function openPw(forced) {
   ["pwCur","pwNew","pwNew2"].forEach(id => $(id).value = "");
   modalMsg("pwMsg", "");
   $("pwCancel").style.display = forced ? "none" : "";
-  $("pwModal").classList.add("open");
+  openModal("pwModal", $("pwCur"));
 }
-function closePw() { if (!pwForced) $("pwModal").classList.remove("open"); }
+function closePw() { if (!pwForced) closeModal("pwModal"); }
 ["click", "keydown", "pointerdown"].forEach(ev =>
   document.addEventListener(ev, noteActivity, { passive: true }));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) noteActivity(); });
@@ -1275,7 +1432,12 @@ document.addEventListener("click", (e) => {
   if (!$("userbar").contains(e.target)) toggleUserMenu(false);
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { toggleUserMenu(false); toggleHelp(false); }
+  if (e.key === "Escape") {
+    toggleUserMenu(false); toggleHelp(false);
+    if (escapeModal()) e.preventDefault();
+  } else if (e.key === "Tab") {
+    trapTab(e);
+  }
 });
 $("emailBtn").addEventListener("click", setMyEmail);
 $("pwBtn").addEventListener("click", () => openPw(false));
@@ -1298,7 +1460,7 @@ $("pwSave").addEventListener("click", async () => {
 function openUsers() {
   modalMsg("usersMsg", "");
   ["nuName","nuPass","nuEmail"].forEach(id => $(id).value = ""); $("nuRole").value = "user";
-  $("usersModal").classList.add("open");
+  openModal("usersModal", $("nuName"));
   refreshUsers();
 }
 async function refreshUsers() {
@@ -1316,14 +1478,14 @@ async function refreshUsers() {
     <td>${u.email ? esc(u.email) : '<span class="sub">no email</span>'}</td>
     <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
     <td style="text-align:right">
-      <button class="linkbtn" data-email="${u.id}" data-cur="${esc(u.email || "")}">Email</button>
+      <button class="linkbtn" data-email="${u.id}" data-cur="${esc(u.email || "")}" data-name="${esc(u.username)}">Email</button>
       ${u.id === me.id ? ' <span class="sub">you</span>'
         : ` · <button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
     </td></tr>`).join("");
   $("userRows").querySelectorAll("[data-del]").forEach(b =>
     b.addEventListener("click", () => deleteUser(b.dataset.del, b.dataset.name)));
   $("userRows").querySelectorAll("[data-email]").forEach(b =>
-    b.addEventListener("click", () => editEmail(b.dataset.email, b.dataset.cur)));
+    b.addEventListener("click", () => editEmail(b.dataset.email, b.dataset.cur, b.dataset.name)));
   $("userRows").querySelectorAll("[data-role]").forEach(s =>
     s.addEventListener("change", () => setRole(s.dataset.role, s.value, s.dataset.name)));
 }
@@ -1340,8 +1502,9 @@ async function setRole(id, role, name) {
   modalMsg("usersMsg", `${name} is now ${role}.`, true);
   refreshUsers();
 }
-async function editEmail(id, current) {
-  const email = window.prompt("Email address for this user (blank to clear):", current || "");
+async function editEmail(id, current, name) {
+  const email = await promptDialog(`Email for ${name}`, "Needed for self-service password reset. Leave blank to clear it.",
+    "Email address", current || "", "email");
   if (email === null) return;
   const res = await apiSend("POST", "/api/users/set_email",
     { id: Number(id), email: email.trim() });
@@ -1352,7 +1515,8 @@ async function editEmail(id, current) {
   refreshUsers();
 }
 async function deleteUser(id, name) {
-  if (!window.confirm("Delete user " + name + "?")) return;
+  if (!await confirmDialog("Delete user", `Delete ${name}? They're signed out immediately and can't log back in.`,
+                           "Delete", true)) return;
   const res = await apiSend("DELETE", "/api/users/" + encodeURIComponent(id));
   if (gone(res)) return;
   const data = await res.json();
@@ -1361,7 +1525,7 @@ async function deleteUser(id, name) {
   refreshUsers();
 }
 $("usersBtn").addEventListener("click", openUsers);
-$("usersClose").addEventListener("click", () => $("usersModal").classList.remove("open"));
+$("usersClose").addEventListener("click", () => closeModal("usersModal"));
 $("nuCreate").addEventListener("click", async () => {
   const username = $("nuName").value.trim(), password = $("nuPass").value,
         role = $("nuRole").value, email = $("nuEmail").value.trim();
@@ -1385,7 +1549,7 @@ function openKeys() {
   modalMsg("keysMsg", "");
   $("nkName").value = ""; $("nkExpiry").value = "";
   $("keyReveal").classList.remove("show"); $("keyValue").textContent = "";
-  $("keysModal").classList.add("open");
+  openModal("keysModal", $("nkName"));
   refreshKeys();
 }
 async function refreshKeys() {
@@ -1412,7 +1576,8 @@ async function refreshKeys() {
     b.addEventListener("click", () => revokeKey(b.dataset.revoke, b.dataset.name)));
 }
 async function revokeKey(id, name) {
-  if (!window.confirm(`Revoke API key "${name}"? Any tool using it will stop working.`)) return;
+  if (!await confirmDialog("Revoke API key", `Revoke "${name}"? Any tool using it stops working immediately.`,
+                           "Revoke", true)) return;
   const res = await apiSend("DELETE", "/api/api_keys/" + encodeURIComponent(id));
   if (gone(res)) return;
   const data = await res.json();
@@ -1421,7 +1586,7 @@ async function revokeKey(id, name) {
   refreshKeys();
 }
 $("keysBtn").addEventListener("click", openKeys);
-$("keysClose").addEventListener("click", () => $("keysModal").classList.remove("open"));
+$("keysClose").addEventListener("click", () => closeModal("keysModal"));
 function selectKeyText() {
   const el = $("keyValue"), sel = window.getSelection(), r = document.createRange();
   r.selectNodeContents(el); sel.removeAllRanges(); sel.addRange(r);
@@ -1568,6 +1733,7 @@ function wireBoard() {
     sec.querySelector("[data-up]").addEventListener("click", () => moveCat(i, -1));
     sec.querySelector("[data-down]").addEventListener("click", () => moveCat(i, 1));
     sec.querySelector("[data-rename]").addEventListener("click", () => renameCat(i));
+    sec.querySelector(".org-cat-name").addEventListener("dblclick", () => renameCat(i));
     sec.querySelector("[data-del]").addEventListener("click", () => delCat(i));
   });
   board.querySelectorAll(".org-chip").forEach(chip => {
@@ -1606,22 +1772,45 @@ function moveCat(i, dir) {
   [cats[i], cats[j]] = [cats[j], cats[i]];
   renderBoard(cats);
 }
+// Rename in place: the name becomes an input; Enter/blur commits, Escape
+// reverts. Invalid names (blank, reserved, duplicate) revert with a message.
 function renameCat(i) {
-  const cats = readBoard();
-  const nn = window.prompt("Rename category:", cats[i].name);
-  if (nn === null) return;
-  const name = nn.trim();
-  if (!name) return;
-  if (name.toLowerCase() === "uncategorized")
-    return modalMsg("orgMsg", "“Uncategorized” is a reserved name.");
-  if (cats.some((c, j) => j !== i && c.name.toLowerCase() === name.toLowerCase()))
-    return modalMsg("orgMsg", "Another category already has that name.");
-  modalMsg("orgMsg", ""); cats[i].name = name; renderBoard(cats);
+  const sec = $("orgBoard").querySelector(`.org-cat[data-i="${i}"]`);
+  const nameEl = sec && sec.querySelector(".org-cat-name");
+  if (!nameEl) return;                       // already being edited
+  const old = nameEl.textContent;
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.value = old; inp.maxLength = 64; inp.className = "org-rename";
+  inp.setAttribute("aria-label", "Category name");
+  nameEl.replaceWith(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = commit => {
+    if (done) return; done = true;
+    let name = commit ? inp.value.trim() : old;
+    // Other categories' names (the one being edited is an input, not a span).
+    const others = [...$("orgBoard").querySelectorAll(".org-cat:not(.uncat) .org-cat-name")]
+      .map(e => e.textContent.toLowerCase());
+    if (!name) name = old;
+    else if (name.toLowerCase() === "uncategorized") {
+      modalMsg("orgMsg", "“Uncategorized” is a reserved name."); name = old;
+    } else if (others.includes(name.toLowerCase())) {
+      modalMsg("orgMsg", "Another category already has that name."); name = old;
+    } else modalMsg("orgMsg", "");
+    const span = document.createElement("span");
+    span.className = "org-cat-name"; span.textContent = name;
+    span.addEventListener("dblclick", () => renameCat(i));
+    inp.replaceWith(span);
+  };
+  inp.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.stopPropagation(); finish(false); }
+  });
+  inp.addEventListener("blur", () => finish(true));
 }
-function delCat(i) {
+async function delCat(i) {
   const cats = readBoard();
-  if (cats[i].devices.length && !window.confirm(
-      `Delete "${cats[i].name}"? Its firewalls move to Uncategorized.`)) return;
+  if (cats[i].devices.length && !await confirmDialog("Delete category",
+      `Delete "${cats[i].name}"? Its firewalls move to Uncategorized.`, "Delete", true)) return;
   cats.splice(i, 1); renderBoard(cats);
 }
 async function openOrg() {
@@ -1636,10 +1825,10 @@ async function openOrg() {
     cats = (l.categories || []).map(c => ({ name: c.name, devices: c.devices.slice() }));
   } catch (e) {}
   renderBoard(cats);
-  $("orgModal").classList.add("open");
+  openModal("orgModal", $("orgNewCat"));
 }
 $("orgBtn").addEventListener("click", openOrg);
-$("orgClose").addEventListener("click", () => $("orgModal").classList.remove("open"));
+$("orgClose").addEventListener("click", () => closeModal("orgModal"));
 $("orgAddCat").addEventListener("click", () => {
   const name = $("orgNewCat").value.trim();
   if (!name) return;
@@ -1663,7 +1852,7 @@ $("orgSave").addEventListener("click", async () => {
     layout = { categories: data.categories, uncategorized: data.uncategorized };
     renderTabs();
     if (view === "overview") renderOverview();
-    $("orgModal").classList.remove("open");
+    closeModal("orgModal");
   } catch (e) { modalMsg("orgMsg", "Network error."); }
 });
 $("logoutBtn").addEventListener("click", async () => {

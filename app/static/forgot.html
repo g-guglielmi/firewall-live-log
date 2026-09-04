@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reset password · Firewall Live Log</title>
 <link rel="icon" type="image/png" href="/favicon.png">
+<script>
+// Honour the theme chosen on the dashboard (stored in localStorage) so the
+// sign-in pages don't flash a different scheme. No value = follow the system.
+try { const t = localStorage.getItem("fll.theme");
+  if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <style>
 :root {
   color-scheme: light;
@@ -19,6 +25,12 @@
     --muted:#898781; --border:rgba(255,255,255,0.12); --accent:#3987e5;
     --good:#0ca30c; --tint-good:rgba(12,163,12,0.13);
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink-2:#c3c2b7;
+  --muted:#898781; --border:rgba(255,255,255,0.12); --accent:#3987e5;
+  --good:#0ca30c; --tint-good:rgba(12,163,12,0.13);
 }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--page); color:var(--ink); min-height:100vh;
