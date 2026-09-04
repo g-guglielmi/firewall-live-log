@@ -85,11 +85,13 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .group-select:hover { border-color:var(--accent); }
 
 /* overview */
-.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-bottom:10px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-bottom:8px; }
 .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
-.tile .v { font-size:24px; font-weight:650; margin-top:2px; }
-.tile .l { color:var(--ink-2); font-size:12px; }
-.tile .s { color:var(--muted); font-size:11.5px; margin-top:2px; }
+/* compact stat tiles: label / value / context in a tighter type scale */
+.tile { padding:9px 13px 8px; }
+.tile .l { color:var(--ink-2); font-size:12.5px; }
+.tile .v { font-size:20px; font-weight:650; line-height:1.25; margin-top:1px; }
+.tile .s { color:var(--muted); font-size:12px; margin-top:1px; }
 /* ops counters that rarely change: one muted line instead of four tiles */
 .health { display:flex; flex-wrap:wrap; gap:6px 18px; color:var(--muted); font-size:12px;
   margin:0 2px 18px; }
@@ -604,6 +606,14 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n).toLocaleString("en-US");
+// 661,712,198 → "661.7M" for standalone tiles (the exact figure goes in a title).
+function fmtCompact(n) {
+  n = Number(n) || 0;
+  if (n < 100000) return fmt(n);
+  const u = [["B", 1e9], ["M", 1e6], ["K", 1e3]];
+  for (const [s, d] of u) if (n >= d) return (n / d).toFixed(n / d < 10 ? 2 : 1) + s;
+  return fmt(n);
+}
 function fmtBytes(n) {
   n = Number(n) || 0;
   const u = ["B", "KB", "MB", "GB", "TB"];
@@ -855,24 +865,23 @@ function renderOverview() {
   const now = stats.now, devs = stats.devices;
   const receiving = devs.filter(d => statusOf(d, now).cls === "receiving").length;
   const span = stats.oldest ? Math.round((stats.newest - stats.oldest)/86400*10)/10 + "d of history" : "no data yet";
-  // Three live numbers up top; the slow-moving ops counters go in a one-line
-  // health strip underneath so firewalls appear sooner (especially on phones).
+  // Compact stat tiles (the header pill already says how many are receiving);
+  // the counters that only matter when non-zero go in the health strip.
   const tiles = [
-    ["Systems receiving", receiving + " / " + devs.length, "active in the last 2 min"],
-    ["Events / min", fmt(stats.events_last_min), "across the fleet"],
-    ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject"],
-    ["Events received", fmt(stats.parsed), span],
+    ["Events / min", fmt(stats.events_last_min), "across the fleet", ""],
+    ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject", ""],
+    ["Events received", fmtCompact(stats.parsed), span, fmt(stats.parsed) + " events since first start"],
+    ["Disk usage", fmtBytes(stats.db_bytes),
+      stats.retention_days + "-day retention" + (stats.max_events ? " · cap " + fmtCompact(stats.max_events) : ""),
+      "events database on disk, incl. WAL"],
   ];
-  $("tiles").innerHTML = tiles.map(([l,v,s]) =>
-    `<div class="card tile"><div class="l">${esc(l)}</div>
+  $("tiles").innerHTML = tiles.map(([l,v,s,t]) =>
+    `<div class="card tile"${t ? ` title="${esc(t)}"` : ""}><div class="l">${esc(l)}</div>
      <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
   const h = (l, v, warn, title) =>
     `<span class="${warn ? "warn" : ""}"${title ? ` title="${esc(title)}"` : ""}>${l} <b>${v}</b></span>`;
   $("health").innerHTML =
-    h("Retention", stats.retention_days + " days", false,
-      stats.max_events ? "plus a cap of " + fmt(stats.max_events) + " events" : "time-based, no row cap")
-    + h("Disk", fmtBytes(stats.db_bytes), false, "events database on disk, incl. WAL")
-    + h("Dropped", fmt(stats.dropped), stats.dropped > 0, "events lost to queue overflow")
+    h("Dropped", fmt(stats.dropped), stats.dropped > 0, "events lost to queue overflow")
     + h("Unparsed", fmt(stats.unparsed), stats.unparsed > 0, "lines that didn't match a known format (kept for diagnosis)");
   const groups = layoutGroups(devs);
   $("sysHead").style.display = groups ? "none" : "";   // group headers replace it
@@ -929,7 +938,8 @@ function sparkHtml(d) {
     const hPct = flat ? 100 : Math.max(n ? 8 : 0, Math.round(n / max * 100));
     const bPct = n ? Math.round((blk[i] || 0) / n * 100) : 0;
     const t = `${n} event${n === 1 ? "" : "s"}${blk[i] ? `, ${blk[i]} blocked` : ""}`;
-    return `<span class="bar${i === hist.length - 1 ? " now" : ""}" style="height:${hPct}%" title="${t}"><i style="height:${bPct}%"></i></span>`;
+    // No inline height when flat, so the 2px baseline from .spark.flat applies.
+    return `<span class="bar${i === hist.length - 1 ? " now" : ""}"${flat ? "" : ` style="height:${hPct}%"`} title="${t}"><i style="height:${bPct}%"></i></span>`;
   }).join("");
   return `<div class="spark${flat ? " flat" : ""}" title="Events per minute, last 15 min (red = blocked)">${bars}</div>`;
 }
