@@ -58,6 +58,7 @@ def run(stop_event, db_path, q, drops, cfg, prune_interval):
         store.meta_set(db, "dev_stats", json.dumps(dev))
         with drops["lock"]:
             store.meta_set(db, "stat_dropped", drops["n"])
+            store.meta_set(db, "stat_ignored", drops["ignored"])
         db.commit()
 
     # Prune once at startup so a restart immediately honors retention.
@@ -78,8 +79,8 @@ def run(stop_event, db_path, q, drops, cfg, prune_interval):
             last_prune = mono
         if mono - last_stats >= STATS_INTERVAL:
             print(f"[writer] parsed={counters['parsed']} "
-                  f"unparsed={counters['unparsed']} dropped={drops['n']} "
-                  f"qdepth={q.qsize()}")
+                  f"unparsed={counters['unparsed']} ignored={drops['ignored']} "
+                  f"dropped={drops['n']} qdepth={q.qsize()}")
             sys.stdout.flush()
             last_stats = mono
 

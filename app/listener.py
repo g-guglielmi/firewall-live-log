@@ -5,7 +5,12 @@ device's configured vendor (or auto-detect), and puts a normalized item
 on the shared queue for the single writer thread to persist.  Queue items:
 
     ("ev", ts, device, vendor, src, dst, proto, dst_port, action, rule)
-    ("un", ts, device, raw)          # unparseable line, kept for diagnosis
+    ("un", ts, device, raw)          # firewall-shaped line we couldn't parse
+
+A datagram that carries no firewall marker at all (ordinary host syslog the
+gateway also forwards — IPsec, DHCP, systemd, …) is not a firewall event; it
+is discarded at the listener and counted in `drops["ignored"]`, so it never
+reaches the queue, the events table, or the unparsed table.
 
 If the queue is full (writer overloaded) the datagram is dropped and the
 shared drop counter is incremented — bounded memory beats unbounded lag.
@@ -48,12 +53,19 @@ def run(stop_event, device, q, drops):
         text = data.decode("utf-8", "replace")
         now = int(time.time())
         rec = parsers.parse(text, device.vendor)
-        if rec is None:
-            item = ("un", now, device.name, text)
-        else:
+        if rec is not None:
             vendor, src, dst, proto, dport, action, rule = rec
             item = ("ev", now, device.name, vendor, src, dst, proto,
                     dport, action, rule)
+        elif parsers.looks_like_firewall(text, device.vendor):
+            item = ("un", now, device.name, text)   # real parser gap
+        else:
+            # Ordinary host syslog the gateway forwards alongside its firewall
+            # logs — not a firewall event. Discard it rather than filling the
+            # unparsed table (and the disk) with VPN/DHCP/OS chatter.
+            with drops["lock"]:
+                drops["ignored"] += 1
+            continue
         try:
             q.put_nowait(item)
         except queue.Full:

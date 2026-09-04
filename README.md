@@ -247,6 +247,20 @@ rather than literally all traffic. The dashboard's **Dropped** tile shows
 whether the writer is ever falling behind (queue overflow); **Unparsed**
 shows lines that didn't match a parser.
 
+### Non-firewall syslog is filtered out
+
+Gateways (UniFi in particular) forward their **entire host syslog** over the
+same port — IPsec/IKE (`charon`), DHCP/DNS (`dnsmasq`), the OOM watchdog,
+`systemd`, and so on. None of that is a firewall event. The collector keeps
+only lines that carry a firewall marker (UniFi `SRC=…DST=…`, Sophos
+`src_ip=…`); everything else is **discarded before it's stored**, so it never
+fills the database or the **Unparsed** count. Discarded lines are tallied
+(exposed as `ignored` on `/api/stats` and in the writer's log line) but not
+kept. Consequently **Unparsed** now means only *"a firewall-shaped line a
+parser couldn't handle"* — a genuine parser gap worth reporting — and should
+sit at or near zero. Unparsed rows also age out on `RETENTION_DAYS` (with a
+10,000-row cap as a backstop).
+
 ## API
 
 | Endpoint | Description |
@@ -294,6 +308,8 @@ of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
   `hist_blocked`: 15 per-minute counts, oldest first — the 14 previous whole
   minutes followed by the rolling last-60s bucket, so the final entry equals
   `events_last_min`. These feed the sparklines on the overview cards.
+  `unparsed` is the live count of firewall-shaped lines no parser handled;
+  `ignored` is the running count of non-firewall syslog discarded this run.
 
 Example — everything blocked in the last hour, as JSON:
 

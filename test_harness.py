@@ -266,8 +266,17 @@ def main():
                     "172.16.0.2", "172.16.0.3", "UDP", 53), P_AUTO)
     send(sophos_line("Allowed", "auto sophos",
                      "172.16.0.4", "172.16.0.5", "UDP", 123), P_AUTO)
-    # Unparseable
-    send(b"this is not a firewall log", P_AUTO)
+    # A firewall-shaped line we can't parse (has the UniFi SRC= marker but no
+    # DST=) is kept as "unparsed" for diagnosis.
+    send(b"<4>Jul 18 12:00:00 UDM kernel: [LAN_IN-A-9] SRC=10.0.0.9 "
+         b"TTL=63 PROTO=TCP SPT=40000 DPT=443", P_AUTO)
+    # Ordinary host syslog the gateway also forwards (no firewall marker) is
+    # discarded, not stored — these three lines count as "ignored".
+    send(b"<30>Jul 18 12:00:01 UDM charon[123]: 12[ENC] generating "
+         b"INFORMATIONAL request 843 [ ]", P_AUTO)
+    send(b"<30>Jul 18 12:00:01 UDM dnsmasq-dhcp[99]: DHCPACK(br0) "
+         b"10.0.0.5 aa:bb:cc:dd:ee:ff phone", P_UNIFI)
+    send(b"this is not a firewall log", P_SOPHOS)
 
     time.sleep(2.5)  # past a flush
 
@@ -415,7 +424,11 @@ def main():
     print("== stats + per-device health + csv + unparsed ==")
     st = get_json("/api/stats")
     check("stats parsed = 63 (lifetime)", st["parsed"] == 63, str(st["parsed"]))
-    check("stats unparsed = 1", st["unparsed"] == 1, str(st["unparsed"]))
+    # Only the firewall-shaped-but-broken line is kept as unparsed; the three
+    # non-firewall lines (charon/dnsmasq/plain text) are discarded.
+    check("stats unparsed = 1 (firewall-shaped only)", st["unparsed"] == 1, str(st["unparsed"]))
+    check("stats ignored = 3 (non-firewall syslog discarded)",
+          st["ignored"] == 3, str(st.get("ignored")))
     # db_bytes: on-disk footprint, >= the main file, and reasonable for 63 rows.
     _main = os.path.getsize(db_path)
     check("stats db_bytes present and covers the on-disk files",

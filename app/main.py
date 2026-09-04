@@ -203,7 +203,9 @@ def main():
           f"max_events={cfg.max_events or 'off'}, db={db_path}")
 
     q = queue.Queue(maxsize=queue_max)
-    drops = {"n": 0, "lock": threading.Lock()}
+    # Shared listener counters: n = datagrams dropped on a full queue,
+    # ignored = non-firewall host syslog discarded before the queue.
+    drops = {"n": 0, "ignored": 0, "lock": threading.Lock()}
     stop_event = threading.Event()
 
     def on_signal(signum, frame):

@@ -102,6 +102,9 @@ def prune(db, retention_days, max_events, unparsed_cap=10000):
         db.execute(
             "DELETE FROM events WHERE id <= "
             "COALESCE((SELECT MAX(id) FROM events), 0) - ?", (max_events,))
+    # Unparsed lines age out on the same retention window (so a table that
+    # stops growing still drains) and are capped by count as a backstop.
+    db.execute("DELETE FROM unparsed WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM unparsed WHERE id <= "
                "COALESCE((SELECT MAX(id) FROM unparsed), 0) - ?",
                (unparsed_cap,))

@@ -229,6 +229,7 @@ def _stats(state):
             "unparsed": unparsed,
             "parsed": int(store.meta_get(db, "stat_parsed", "0")),
             "dropped": int(store.meta_get(db, "stat_dropped", "0")),
+            "ignored": int(store.meta_get(db, "stat_ignored", "0")),
             "devices": devices,
             "now": now,
         }

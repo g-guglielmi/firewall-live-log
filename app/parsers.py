@@ -40,6 +40,27 @@ def detect_vendor(line):
     return None
 
 
+_MARKERS = {"unifi": _MARK_UNIFI, "sophos": _MARK_SOPHOS}
+
+
+def looks_like_firewall(line, vendor="auto"):
+    """True if the line carries a vendor's firewall-log marker (UniFi `SRC=`,
+    Sophos `src_ip=`).
+
+    Gateways forward their whole host syslog — IPsec (charon), DHCP (dnsmasq),
+    the OOM watchdog, systemd, and so on — over the same port as the firewall
+    logs. Those aren't firewall events and shouldn't be parsed *or* kept as
+    "unparsed". This marker test separates the two: a line with a marker that
+    still fails to parse is a real parser gap worth keeping to diagnose; a line
+    without any marker is ordinary host syslog, and the collector discards it.
+    For a port pinned to one vendor only that vendor's marker counts; in
+    auto mode either does."""
+    mark = _MARKERS.get(vendor)
+    if mark is not None:
+        return bool(mark.search(line))
+    return bool(_MARK_UNIFI.search(line) or _MARK_SOPHOS.search(line))
+
+
 # --------------------------------------------------------------------------
 # UniFi (iptables-style)
 # --------------------------------------------------------------------------
