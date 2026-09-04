@@ -584,15 +584,20 @@ function renderTabs() {
       <span class="dot s-${st.cls}"></span>${esc(d.name)}</button>`;
   };
   let h = `<button class="tab${view==="overview"?" active":""}" data-view="overview">Overview</button>`;
-  // Follow the same grouping/order as the overview; fall back to config order
-  // when no categories are defined.
-  const groups = layoutGroups(devs);
-  if (!groups) {
-    h += devs.map(tabHtml).join("");
-  } else {
-    h += groups.map(g =>
-      `<span class="tab-group">${esc(g.name)}</span>` + g.devs.map(tabHtml).join("")
-    ).join("");
+  // Scales to large fleets: the overview shows only its own tab (navigate via
+  // the cards); a firewall view shows only the group the current firewall is
+  // in (labelled), so you can flip between its siblings without leaving.
+  if (view !== "overview") {
+    const groups = layoutGroups(devs);
+    const group = groups && groups.find(g => g.devs.some(d => d.name === view));
+    if (group) {
+      h += `<span class="tab-group">${esc(group.name)}</span>`
+        + group.devs.map(tabHtml).join("");
+    } else {
+      // No categories (or the device isn't placed): flat list so an ungrouped
+      // setup can still switch firewalls from a device view.
+      h += devs.map(tabHtml).join("");
+    }
   }
   $("tabs").innerHTML = h;
   $("tabs").querySelectorAll(".tab").forEach(b =>
