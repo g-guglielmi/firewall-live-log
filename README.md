@@ -182,9 +182,10 @@ server-side to `LAYOUT_PATH` (default `layout.json` beside the events DB) —
 cards (collapsible category sections). To stay readable on large fleets, the
 **top tab strip is scoped**: the overview shows only its own tab (navigate via
 the cards), and a firewall view shows just the group that firewall belongs to
-— its category label plus that group's firewalls — so you can flip between
-siblings without a wall of tabs. Any firewall not placed in a category shows
-under **Uncategorized**, so newly added devices always appear.
+plus that group's firewalls, so you can flip between siblings without a wall of
+tabs. A **group dropdown** next to the Overview tab jumps straight to any other
+group (its first firewall). Any firewall not placed in a category shows under
+**Uncategorized**, so newly added devices always appear.
 
 ## Configure the firewalls to send syslog
 

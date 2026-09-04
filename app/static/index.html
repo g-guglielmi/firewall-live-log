@@ -71,9 +71,10 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .tab.active { color:var(--ink); background:var(--surface);
   border-color:var(--border); border-bottom-color:var(--surface);
   margin-bottom:-1px; }
-.tab-group { align-self:center; margin:2px 0 2px 4px; padding:2px 2px 2px 10px;
-  border-left:1px solid var(--border); color:var(--muted); font-size:10.5px;
-  font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.group-select { align-self:center; margin-left:6px; background:var(--surface); color:var(--ink);
+  border:1px solid var(--border); border-radius:8px; padding:5px 9px; font:inherit; font-size:12.5px;
+  font-weight:600; cursor:pointer; }
+.group-select:hover { border-color:var(--accent); }
 
 /* overview */
 .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
@@ -575,9 +576,20 @@ function relTime(ts, now) {
 }
 
 /* ---------------- Tabs ---------------- */
+let _tabsSig = null;
 function renderTabs() {
   const devs = stats ? stats.devices : [];
   const now = stats ? stats.now : 0;
+  // Rebuild only when the *set* of tabs changes (view / layout / device list).
+  // A plain status poll leaves the DOM alone and just refreshes the dots, so
+  // an open group dropdown isn't torn down every few seconds.
+  const laySig = layout ? JSON.stringify(
+    [(layout.categories || []).map(c => [c.name, c.devices]),
+     layout.uncategorized || []]) : "";
+  const sig = view + "|" + laySig + "|" + devs.map(d => d.name).join(",");
+  if (sig === _tabsSig) { updateTabDots(devs, now); return; }
+  _tabsSig = sig;
+
   const tabHtml = d => {
     const st = statusOf(d, now);
     return `<button class="tab${view===d.name?" active":""}" data-view="${esc(d.name)}">
@@ -586,22 +598,35 @@ function renderTabs() {
   let h = `<button class="tab${view==="overview"?" active":""}" data-view="overview">Overview</button>`;
   // Scales to large fleets: the overview shows only its own tab (navigate via
   // the cards); a firewall view shows only the group the current firewall is
-  // in (labelled), so you can flip between its siblings without leaving.
-  if (view !== "overview") {
-    const groups = layoutGroups(devs);
-    const group = groups && groups.find(g => g.devs.some(d => d.name === view));
-    if (group) {
-      h += `<span class="tab-group">${esc(group.name)}</span>`
-        + group.devs.map(tabHtml).join("");
-    } else {
-      // No categories (or the device isn't placed): flat list so an ungrouped
-      // setup can still switch firewalls from a device view.
-      h += devs.map(tabHtml).join("");
-    }
+  // in. A group dropdown lets you jump straight to any other group.
+  const groups = layoutGroups(devs);
+  if (groups) {
+    const cur = groups.find(g => g.devs.some(d => d.name === view));
+    let opts = cur ? "" : `<option value="" selected disabled>Jump to group…</option>`;
+    groups.forEach(g => {
+      const first = g.devs[0] ? g.devs[0].name : "";
+      opts += `<option value="${esc(first)}"${cur && cur.name === g.name ? " selected" : ""}>${
+        esc(g.name)} (${g.devs.length})</option>`;
+    });
+    h += `<select class="group-select" id="groupSel" title="Jump to a group">${opts}</select>`;
+    if (cur) h += cur.devs.map(tabHtml).join("");   // this group's firewalls
+  } else if (view !== "overview") {
+    // No categories: flat list on a device view so switching still works.
+    h += devs.map(tabHtml).join("");
   }
   $("tabs").innerHTML = h;
   $("tabs").querySelectorAll(".tab").forEach(b =>
     b.addEventListener("click", () => go(b.dataset.view)));
+  const sel = $("groupSel");
+  if (sel) sel.addEventListener("change", () => { if (sel.value) go(sel.value); });
+}
+function updateTabDots(devs, now) {
+  const byName = {};
+  devs.forEach(d => byName[d.name] = d);
+  $("tabs").querySelectorAll(".tab[data-view]").forEach(b => {
+    const d = byName[b.dataset.view], dot = b.querySelector(".dot");
+    if (d && dot) dot.className = "dot s-" + statusOf(d, now).cls;
+  });
 }
 
 /* ---------------- Overview ---------------- */
