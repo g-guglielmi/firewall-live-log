@@ -77,23 +77,38 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .group-select:hover { border-color:var(--accent); }
 
 /* overview */
-.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-bottom:10px; }
 .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:12px 14px; }
 .tile .v { font-size:24px; font-weight:650; margin-top:2px; }
 .tile .l { color:var(--ink-2); font-size:12px; }
 .tile .s { color:var(--muted); font-size:11.5px; margin-top:2px; }
+/* ops counters that rarely change: one muted line instead of four tiles */
+.health { display:flex; flex-wrap:wrap; gap:6px 18px; color:var(--muted); font-size:12px;
+  margin:0 2px 18px; }
+.health b { color:var(--ink-2); font-weight:600; }
+.health .warn b { color:var(--serious); }
 .sys-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
 .sys-card { background:var(--surface); border:1px solid var(--border);
   border-radius:12px; padding:14px 15px; cursor:pointer; transition:border-color .1s; }
 .sys-card:hover { border-color:var(--accent); }
 .sys-card.receiving { box-shadow:inset 3px 0 0 var(--good); }
 .sys-card.quiet { box-shadow:inset 3px 0 0 var(--warning); }
-.sys-card.stale, .sys-card.nodata { box-shadow:inset 3px 0 0 var(--critical); }
+.sys-card.stale { box-shadow:inset 3px 0 0 var(--critical); }
+.sys-card.nodata { box-shadow:inset 3px 0 0 var(--muted); }   /* never seen ≠ outage */
 .sys-card .name { font-weight:650; font-size:15px; }
 .sys-card .meta { color:var(--muted); font-size:12px; margin-top:2px; }
 .sys-card .row { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
 .sys-card .rate { font-variant-numeric:tabular-nums; }
 .sys-card .big { font-size:20px; font-weight:650; }
+.sys-card .blk { color:var(--critical); font-size:12px; font-variant-numeric:tabular-nums; }
+/* 15-minute sparkline: total bar in muted ink, blocked share in red on top */
+.spark { display:flex; align-items:flex-end; gap:2px; height:30px; margin-top:12px; }
+.spark .bar { flex:1; display:flex; flex-direction:column; justify-content:flex-end;
+  min-height:2px; background:var(--grid); border-radius:2px 2px 0 0; overflow:hidden; }
+.spark .bar > i { display:block; background:var(--critical); opacity:.85; }
+.spark .bar.now { background:var(--baseline); }
+.spark.flat { align-items:center; }
+.spark.flat .bar { height:2px; }
 /* overview categories */
 .sys-cat { margin-bottom:14px; }
 .cat-head { display:flex; align-items:center; gap:8px; width:100%; background:none;
@@ -316,7 +331,8 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   <!-- Overview -->
   <div id="page-overview">
     <div class="tiles" id="tiles"></div>
-    <h2>Systems</h2>
+    <div class="health" id="health"></div>
+    <h2 id="sysHead">Systems</h2>
     <div id="sysWrap"></div>
   </div>
 
@@ -663,7 +679,7 @@ function renderTabs() {
   const groups = layoutGroups(devs);
   if (groups) {
     const cur = groups.find(g => g.devs.some(d => d.name === view));
-    let opts = cur ? "" : `<option value="" selected disabled>Jump to group…</option>`;
+    let opts = cur ? "" : `<option value="" selected disabled>Groups…</option>`;
     groups.forEach(g => {
       const first = g.devs[0] ? g.devs[0].name : "";
       opts += `<option value="${esc(first)}"${cur && cur.name === g.name ? " selected" : ""}>${
@@ -695,20 +711,28 @@ function renderOverview() {
   if (!stats) return;
   const now = stats.now, devs = stats.devices;
   const receiving = devs.filter(d => statusOf(d, now).cls === "receiving").length;
-  const span = stats.oldest ? Math.round((stats.newest - stats.oldest)/86400*10)/10 + "d span" : "no data";
+  const span = stats.oldest ? Math.round((stats.newest - stats.oldest)/86400*10)/10 + "d of history" : "no data yet";
+  // Three live numbers up top; the slow-moving ops counters go in a one-line
+  // health strip underneath so firewalls appear sooner (especially on phones).
   const tiles = [
-    ["Systems receiving", receiving + " / " + devs.length, "active in last 2 min"],
+    ["Systems receiving", receiving + " / " + devs.length, "active in the last 2 min"],
     ["Events / min", fmt(stats.events_last_min), "across the fleet"],
+    ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject"],
     ["Events received", fmt(stats.parsed), span],
-    ["Disk usage", fmtBytes(stats.db_bytes), "events database (incl. WAL)"],
-    ["Retention", stats.retention_days + " days", stats.max_events ? "cap " + fmt(stats.max_events) : "time-based"],
-    ["Dropped", fmt(stats.dropped), "queue overflow"],
-    ["Unparsed", fmt(stats.unparsed), "kept for diagnosis"],
   ];
   $("tiles").innerHTML = tiles.map(([l,v,s]) =>
     `<div class="card tile"><div class="l">${esc(l)}</div>
      <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
+  const h = (l, v, warn, title) =>
+    `<span class="${warn ? "warn" : ""}"${title ? ` title="${esc(title)}"` : ""}>${l} <b>${v}</b></span>`;
+  $("health").innerHTML =
+    h("Retention", stats.retention_days + " days", false,
+      stats.max_events ? "plus a cap of " + fmt(stats.max_events) + " events" : "time-based, no row cap")
+    + h("Disk", fmtBytes(stats.db_bytes), false, "events database on disk, incl. WAL")
+    + h("Dropped", fmt(stats.dropped), stats.dropped > 0, "events lost to queue overflow")
+    + h("Unparsed", fmt(stats.unparsed), stats.unparsed > 0, "lines that didn't match a known format (kept for diagnosis)");
   const groups = layoutGroups(devs);
+  $("sysHead").style.display = groups ? "none" : "";   // group headers replace it
   if (!groups) {
     $("sysWrap").innerHTML = `<div class="sys-grid">${
       devs.map(d => sysCardHtml(d, now)).join("")}</div>`;
@@ -720,7 +744,7 @@ function renderOverview() {
         <button class="cat-head" type="button">
           <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4 6l4 4 4-4z"></path></svg>
           <span class="cat-name">${esc(g.name)}</span>
-          <span class="cat-count">${recv}/${g.devs.length}</span>
+          <span class="cat-count" title="${recv} of ${g.devs.length} receiving in the last 2 min">${recv}/${g.devs.length} receiving</span>
           ${recv ? '<span class="cat-recv" title="receiving"></span>' : ""}
         </button>
         <div class="sys-grid">${g.devs.map(d => sysCardHtml(d, now)).join("")}</div>
@@ -745,11 +769,26 @@ function sysCardHtml(d, now) {
         <span class="pill"><span class="dot s-${st.cls}"></span>${st.label}</span>
         <span class="sub">${relTime(d.last_seen, now)}</span>
       </div>
+      ${sparkHtml(d)}
       <div class="row">
-        <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span></span>
+        <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span>${
+          d.blocked_last_min ? ` <span class="blk">· ${fmt(d.blocked_last_min)} blocked</span>` : ""}</span>
         <span class="sub">${fmt(d.events)} total</span>
       </div>
     </div>`;
+}
+// Last 15 minutes, one bar per minute (oldest left); the red share is blocked.
+function sparkHtml(d) {
+  const hist = d.hist || [], blk = d.hist_blocked || [];
+  const max = Math.max(1, ...hist);
+  const flat = !hist.some(Boolean);
+  const bars = hist.map((n, i) => {
+    const hPct = flat ? 100 : Math.max(n ? 8 : 0, Math.round(n / max * 100));
+    const bPct = n ? Math.round((blk[i] || 0) / n * 100) : 0;
+    const t = `${n} event${n === 1 ? "" : "s"}${blk[i] ? `, ${blk[i]} blocked` : ""}`;
+    return `<span class="bar${i === hist.length - 1 ? " now" : ""}" style="height:${hPct}%" title="${t}"><i style="height:${bPct}%"></i></span>`;
+  }).join("");
+  return `<div class="spark${flat ? " flat" : ""}" title="Events per minute, last 15 min (red = blocked)">${bars}</div>`;
 }
 // Resolve the saved layout into renderable groups of live device objects, or
 // null when no categories are defined (fall back to a flat grid).

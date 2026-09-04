@@ -432,6 +432,20 @@ def main():
     check("all 3 devices seen this minute",
           sum(1 for d in st["devices"] if d["events_last_min"] > 0) == 3,
           str({k: v["events_last_min"] for k, v in dmap.items()}))
+    # Sparkline histograms: 15 buckets, last bucket = the rolling /min figure,
+    # blocked never exceeds total, fleet blocked = sum of per-device.
+    check("per-device hist is 15 buckets ending in events_last_min",
+          all(len(d["hist"]) == 15 and len(d["hist_blocked"]) == 15
+              and d["hist"][-1] == d["events_last_min"]
+              and d["hist_blocked"][-1] == d["blocked_last_min"]
+              and all(b <= t for t, b in zip(d["hist"], d["hist_blocked"]))
+              for d in st["devices"]),
+          str({k: (v["hist"][-1], v["events_last_min"]) for k, v in dmap.items()}))
+    check("blocked_last_min counts the Drop/Block events",
+          dmap["UDM-Test"]["blocked_last_min"] > 0
+          and st["blocked_last_min"] == sum(d["blocked_last_min"] for d in st["devices"])
+          and st["blocked_last_min"] < st["events_last_min"],
+          str({k: v["blocked_last_min"] for k, v in dmap.items()}))
     with _OPENER.open(urllib.request.Request(
             BASE + "/api/events.csv?window=86400"), timeout=10) as r:
         csv_text = r.read().decode()

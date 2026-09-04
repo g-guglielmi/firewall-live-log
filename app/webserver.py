@@ -37,6 +37,7 @@ class AppState:
         self.layout = layout            # layout.LayoutStore, or None
         self.lock = threading.Lock()
         self._db = None
+        self._hist_cache = (None, None)   # (minute_key, per-device buckets)
 
     def _db_ro(self):
         if self._db is None:
@@ -149,6 +150,34 @@ def _validate_layout(cats, valid_names):
     return clean
 
 
+HIST_MINUTES = 15                    # sparkline width on the overview cards
+_BLOCKED_SQL = "action IN ('Block','Drop','Reject')"
+
+
+def _completed_minutes(state, db, m0):
+    """Per-device (total, blocked) counts for the HIST_MINUTES-1 whole minutes
+    before m0 (a minute boundary). Those buckets can't change any more, so the
+    result is cached per minute: one 14-minute index range-scan per minute
+    instead of one per 5-second poll."""
+    key, cached = state._hist_cache
+    if key == m0:
+        return cached
+    n = HIST_MINUTES - 1
+    base = m0 - n * 60
+    out = {}
+    for dev, b, blk, cnt in db.execute(
+            f"SELECT device, (ts - ?) / 60, {_BLOCKED_SQL}, COUNT(*) "
+            "FROM events INDEXED BY idx_events_ts "
+            "WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3", (base, base, m0)):
+        tot, blocked = out.setdefault(dev, ([0] * n, [0] * n))
+        b = max(0, min(n - 1, int(b)))
+        tot[b] += cnt
+        if blk:
+            blocked[b] += cnt
+    state._hist_cache = (m0, out)
+    return out
+
+
 def _stats(state):
     def run(db):
         now = int(time.time())
@@ -160,9 +189,17 @@ def _stats(state):
         # to skip the GROUP BY sort and then scans the *whole* table to apply
         # the ts filter (seconds on a multi-GB DB, every stats poll). INDEXED
         # BY makes it range-scan just the last 60 s and group those few rows.
-        recent = {r[0]: r[1] for r in db.execute(
-            "SELECT device, COUNT(*) FROM events INDEXED BY idx_events_ts "
-            "WHERE ts >= ? GROUP BY device", (now - 60,))}
+        recent, recent_blk = {}, {}
+        for dev, blk, cnt in db.execute(
+                f"SELECT device, {_BLOCKED_SQL}, COUNT(*) FROM events "
+                "INDEXED BY idx_events_ts WHERE ts >= ? GROUP BY 1, 2",
+                (now - 60,)):
+            recent[dev] = recent.get(dev, 0) + cnt
+            if blk:
+                recent_blk[dev] = recent_blk.get(dev, 0) + cnt
+        # Sparkline: 14 completed minutes (cached) + the rolling last-60s
+        # bucket, so the last bar always equals the /min figure on the card.
+        hist = _completed_minutes(state, db, now // 60 * 60)
         # MIN and MAX in one SELECT can't both use the ts index, so SQLite
         # scans the whole table (seconds on a multi-GB DB, and it blocks the
         # shared read connection). Two scalar subqueries each do an O(log n)
@@ -171,14 +208,20 @@ def _stats(state):
                           "(SELECT MAX(ts) FROM events)").fetchone()
         unparsed = db.execute("SELECT COUNT(*) FROM unparsed").fetchone()[0]
         devices = []
+        empty = [0] * (HIST_MINUTES - 1)
         for d in state.devices:
             ds = dev_stats.get(d.name, {})
+            tot, blk = hist.get(d.name, (empty, empty))
             devices.append({**d.as_dict(),
                             "events": ds.get("total", 0),
                             "last_seen": ds.get("last_seen"),
-                            "events_last_min": recent.get(d.name, 0)})
+                            "events_last_min": recent.get(d.name, 0),
+                            "blocked_last_min": recent_blk.get(d.name, 0),
+                            "hist": tot + [recent.get(d.name, 0)],
+                            "hist_blocked": blk + [recent_blk.get(d.name, 0)]})
         return {
             "events_last_min": sum(recent.values()),
+            "blocked_last_min": sum(recent_blk.values()),
             "oldest": span[0], "newest": span[1],
             "db_bytes": store.db_disk_bytes(state.db_path),
             "retention_days": state.cfg.retention_days,

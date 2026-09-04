@@ -40,8 +40,10 @@ retention so you also get short-term history and CSV export.
 
 ## Screenshots
 
-**Overview** — fleet health at a glance: every system with its status,
-current rate, and last-seen; one tab per system.
+**Overview** — fleet health at a glance: fleet-wide events and blocks per
+minute up top, then every system with its status, last-seen, a 15-minute
+sparkline (red = blocked share), and its current rate. Slow-moving counters
+(retention, disk, dropped, unparsed) sit in a one-line health strip.
 
 ![Overview dashboard showing six firewalls with receiving/no-data status cards](docs/overview.svg)
 
@@ -285,7 +287,12 @@ of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
 - **`GET /api/events.csv`** → CSV with a header row (`time,device,vendor,src,
   dst,proto,dst_port,action,rule`); `time` is local, uncapped by row limit.
 - **`GET /api/stats`** → totals, per-device activity, `oldest`/`newest`
-  timestamps, `db_bytes`, retention, and `now` (server epoch).
+  timestamps, `db_bytes`, retention, and `now` (server epoch). Fleet-wide
+  and per-device `events_last_min` / `blocked_last_min` are rolling 60-second
+  counts (blocked = Block/Drop/Reject). Each device also carries `hist` and
+  `hist_blocked`: 15 per-minute counts, oldest first — the 14 previous whole
+  minutes followed by the rolling last-60s bucket, so the final entry equals
+  `events_last_min`. These feed the sparklines on the overview cards.
 
 Example — everything blocked in the last hour, as JSON:
 
