@@ -30,10 +30,11 @@ _MAX_BODY = 64 * 1024
 
 
 class AppState:
-    def __init__(self, db_path, devices, cfg):
+    def __init__(self, db_path, devices, cfg, layout=None):
         self.db_path = db_path
         self.devices = devices          # list of config.Device
         self.cfg = cfg
+        self.layout = layout            # layout.LayoutStore, or None
         self.lock = threading.Lock()
         self._db = None
 
@@ -102,6 +103,50 @@ def _filters_from(params):
             "ip": one("ip"), "src": one("src"), "dst": one("dst"),
             "rule": one("rule"), "proto": one("proto"), "port": port,
             "action": one("action")}
+
+
+MAX_CATEGORIES = 50
+
+
+def _validate_layout(cats, valid_names):
+    """Clean an incoming overview layout ([{name, devices}]). Category names
+    must be 1-64 printable chars, unique (case-insensitively), and not the
+    reserved 'Uncategorized'. Unknown or duplicated device names are dropped
+    silently so a stale client can't corrupt the layout. Raises ValueError
+    (-> 400) on structurally bad input."""
+    if not isinstance(cats, list):
+        raise ValueError("categories must be a list")
+    if len(cats) > MAX_CATEGORIES:
+        raise ValueError(f"too many categories (max {MAX_CATEGORIES})")
+    seen_cat = set()
+    seen_dev = set()
+    clean = []
+    for c in cats:
+        if not isinstance(c, dict):
+            raise ValueError("each category must be an object")
+        name = c.get("name")
+        if not isinstance(name, str):
+            raise ValueError("category name must be a string")
+        name = name.strip()
+        if not (1 <= len(name) <= 64):
+            raise ValueError("category names must be 1-64 characters")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+            raise ValueError("category name must not contain control characters")
+        if name.casefold() == "uncategorized":
+            raise ValueError("'Uncategorized' is a reserved category name")
+        if name.casefold() in seen_cat:
+            raise ValueError(f"duplicate category name: {name!r}")
+        seen_cat.add(name.casefold())
+        devs = c.get("devices", [])
+        if not isinstance(devs, list):
+            raise ValueError("a category's devices must be a list")
+        placed = []
+        for d in devs:
+            if isinstance(d, str) and d in valid_names and d not in seen_dev:
+                placed.append(d)
+                seen_dev.add(d)
+        clean.append({"name": name, "devices": placed})
+    return clean
 
 
 def _stats(state):
@@ -368,6 +413,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/devices":
                 self._json([d.as_dict() for d in self.state.devices])
                 return
+            if path == "/api/layout":
+                self._json(self._resolved_layout())
+                return
             if path == "/api/live":
                 try:
                     since = int(params.get("since", ["0"])[0])
@@ -470,6 +518,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/api_keys":
                 self._handle_create_api_key(user)
+                return
+            if path == "/api/layout":
+                self._handle_save_layout(user)
                 return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
@@ -660,6 +711,30 @@ class Handler(BaseHTTPRequestHandler):
         key_id, raw = self.auth.create_api_key(
             body.get("name", ""), created_by=user["id"], expires_at=expires_at)
         self._json({"ok": True, "id": key_id, "key": raw}, 201)
+
+    def _resolved_layout(self):
+        """The overview grouping resolved against the configured devices:
+        ``{categories: [{name, devices:[name…]}], uncategorized: [name…]}``.
+        With no layout store (shouldn't happen) or none saved, categories is
+        empty and every device is uncategorized."""
+        names = [d.name for d in self.state.devices]
+        if not self.state.layout:
+            return {"categories": [], "uncategorized": names}
+        cats, unc = self.state.layout.resolve(names)
+        return {"categories": cats, "uncategorized": unc}
+
+    def _handle_save_layout(self, user):
+        if user["role"] != "admin":
+            self._json({"error": "admin required"}, 403)
+            return
+        if not self.state.layout:
+            self._json({"error": "layout storage is unavailable"}, 500)
+            return
+        body = self._read_json_body()
+        valid = {d.name for d in self.state.devices}
+        clean = _validate_layout(body.get("categories"), valid)  # ValueError->400
+        self.state.layout.save(clean)
+        self._json({"ok": True, **self._resolved_layout()})
 
     # -- public self-service password reset --------------------------------
     def _handle_forgot_password(self):

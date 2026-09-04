@@ -9,6 +9,7 @@ One process:
 Configuration:
   DEVICES_CONFIG   path to devices.json      (default /data/devices.json)
   DB_PATH          SQLite file               (default /data/events.db)
+  LAYOUT_PATH      overview grouping/order   (default <db dir>/layout.json)
   HTTP_PORT        dashboard port            (default 8080)
   HTTP_BIND        dashboard bind address    (default 0.0.0.0)
   RETENTION_DAYS   overrides config value    (default 14)
@@ -30,6 +31,7 @@ import time
 
 import auth as auth_mod
 import config
+import layout as layout_mod
 import listener
 import mailer as mailer_mod
 import store
@@ -224,7 +226,10 @@ def main():
         t.start()
         listener_threads.append(t)
 
-    state = webserver.AppState(db_path, cfg.devices, cfg)
+    layout_path = env("LAYOUT_PATH", os.path.join(
+        os.path.dirname(db_path) or ".", "layout.json"))
+    layout_store = layout_mod.LayoutStore(layout_path)
+    state = webserver.AppState(db_path, cfg.devices, cfg, layout_store)
     httpd = webserver.serve(state, http_bind, http_port,
                             auth_manager=auth_manager,
                             auth_enabled=auth_enabled,

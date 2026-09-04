@@ -170,6 +170,18 @@ a route and firewall permission to reach that VLAN.
 
 Editing `devices.json` takes effect on container restart.
 
+### Organizing the overview (categories + order)
+
+Keep `devices.json` in whatever order suits you (e.g. by UDP port) — how the
+firewalls are **grouped and ordered on the Overview is a separate,
+GUI-managed preference**. An admin opens the account menu →
+**Organize systems**, creates categories, and drags firewalls into them and
+into the order they want. It's one shared arrangement everyone sees, saved
+server-side to `LAYOUT_PATH` (default `layout.json` beside the events DB) —
+`devices.json` is never touched. Categories are collapsible on the overview,
+and any firewall not placed in a category shows under **Uncategorized**, so
+newly added devices always appear.
+
 ## Configure the firewalls to send syslog
 
 - **UniFi (UDM / UniFi OS):** Settings → CyberSecure → Traffic Logging →
@@ -185,6 +197,7 @@ Editing `devices.json` takes effect on container restart.
 |---|---|---|
 | `DEVICES_CONFIG` | `/data/devices.json` | Path to the device config. |
 | `DB_PATH` | `/data/events.db` | SQLite file (on the bind mount). |
+| `LAYOUT_PATH` | `<db dir>/layout.json` | Overview grouping/order (admin-managed via the GUI). |
 | `HTTP_PORT` / `HTTP_BIND` | `8080` / `0.0.0.0` | Dashboard/API. |
 | `RETENTION_DAYS` | `14` | Overrides the config value. |
 | `MAX_EVENTS` | `0` | Row-count cap (0 = off); overrides config. |

@@ -601,6 +601,64 @@ def main():
     code, _, _ = request("DELETE", "/api/api_keys/999999", csrf=False)
     check("revoke without CSRF rejected (403)", code == 403, str(code))
 
+    print("== overview layout (categories + order) ==")
+    # Fresh install: no categories, every device uncategorized (config order).
+    _, lay, _ = request("GET", "/api/layout")
+    check("layout starts empty, all devices uncategorized",
+          lay.get("categories") == []
+          and set(lay.get("uncategorized", [])) ==
+          {"UDM-Test", "Sophos-Test", "Mixed-Auto"}, str(lay))
+    # Non-admin (viewer1, a 'user' now) cannot save the shared layout.
+    code, _ = op2_json("/api/layout",
+                       {"categories": [{"name": "X", "devices": []}]},
+                       csrf=v_csrf)
+    check("non-admin cannot save layout (403)", code == 403, str(code))
+    # State-changing, so CSRF is required.
+    code, _, _ = request("POST", "/api/layout",
+                         {"categories": [{"name": "X", "devices": []}]},
+                         csrf=False)
+    check("save layout without CSRF rejected (403)", code == 403, str(code))
+    # Admin saves a grouping + order; the resolved layout echoes back.
+    code, body, _ = request("POST", "/api/layout", {"categories": [
+        {"name": "Core", "devices": ["Mixed-Auto", "UDM-Test"]},
+        {"name": "Perimeter", "devices": ["Sophos-Test"]},
+    ]}, csrf=True)
+    check("admin saves a layout (200)",
+          code == 200 and body.get("ok")
+          and [c["name"] for c in body.get("categories", [])] == ["Core", "Perimeter"]
+          and body["categories"][0]["devices"] == ["Mixed-Auto", "UDM-Test"]
+          and body.get("uncategorized") == [], f"{code} {body}")
+    # GET reflects the saved layout, and it persisted to LAYOUT_PATH on disk.
+    _, lay2, _ = request("GET", "/api/layout")
+    check("saved layout is read back",
+          lay2["categories"][1]["devices"] == ["Sophos-Test"], str(lay2))
+    layout_file = os.path.join(tmp, "layout.json")
+    check("layout persisted to disk", os.path.exists(layout_file), layout_file)
+    # Unknown device names are dropped; a missing device falls to uncategorized.
+    code, body, _ = request("POST", "/api/layout", {"categories": [
+        {"name": "Mix", "devices": ["ghost-fw", "UDM-Test", "UDM-Test"]},
+    ]}, csrf=True)
+    check("unknown/duplicate devices dropped, rest uncategorized",
+          code == 200 and body["categories"][0]["devices"] == ["UDM-Test"]
+          and set(body["uncategorized"]) == {"Sophos-Test", "Mixed-Auto"},
+          str(body))
+    # Reserved and duplicate category names are rejected.
+    code, _, _ = request("POST", "/api/layout",
+                         {"categories": [{"name": "Uncategorized", "devices": []}]},
+                         csrf=True)
+    check("reserved category name rejected (400)", code == 400, str(code))
+    code, _, _ = request("POST", "/api/layout", {"categories": [
+        {"name": "Dup", "devices": []}, {"name": "dup", "devices": []}]},
+        csrf=True)
+    check("duplicate category names rejected (400)", code == 400, str(code))
+    code, _, _ = request("POST", "/api/layout", {"categories": "nope"}, csrf=True)
+    check("non-list categories rejected (400)", code == 400, str(code))
+    # Layout is not an API-key route (session-only).
+    code, _, _ = api_get("/api/layout", None)
+    check("layout requires a session (401 without creds)", code == 401, str(code))
+    # Reset to a clean slate so nothing downstream depends on the grouping.
+    request("POST", "/api/layout", {"categories": []}, csrf=True)
+
     print("== rate limiting (5 fails / 15 min) ==")
     for i in range(5):
         code, _, _ = request("POST", "/api/login",

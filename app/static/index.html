@@ -90,6 +90,42 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sys-card .row { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
 .sys-card .rate { font-variant-numeric:tabular-nums; }
 .sys-card .big { font-size:20px; font-weight:650; }
+/* overview categories */
+.sys-cat { margin-bottom:14px; }
+.cat-head { display:flex; align-items:center; gap:8px; width:100%; background:none;
+  border:0; padding:6px 2px; margin-bottom:8px; cursor:pointer; color:var(--ink); font:inherit; }
+.cat-head .chev { width:13px; height:13px; color:var(--muted); transition:transform .15s; flex:none; }
+.sys-cat.collapsed .chev { transform:rotate(-90deg); }
+.sys-cat.collapsed .sys-grid { display:none; }
+.cat-head .cat-name { font-weight:650; font-size:14px; }
+.cat-head .cat-count { color:var(--muted); font-size:11.5px; border:1px solid var(--border);
+  border-radius:999px; padding:1px 8px; }
+.cat-head .cat-recv { width:7px; height:7px; border-radius:50%; background:var(--good); flex:none; }
+
+/* organize-systems modal */
+.org-add { display:flex; gap:8px; margin:6px 0 12px; }
+.org-add input { flex:1; }
+.org-add button { white-space:nowrap; }
+#orgBoard { max-height:52vh; overflow-y:auto; }
+.org-cat { border:1px solid var(--border); border-radius:10px; margin-bottom:10px; background:var(--page); }
+.org-cat.uncat { background:transparent; border-style:dashed; }
+.org-cat-head { display:flex; align-items:center; gap:6px; padding:7px 9px; border-bottom:1px solid var(--grid); }
+.org-cat.uncat .org-cat-head { border-bottom:0; }
+.org-cat-name { font-weight:650; font-size:13px; flex:1; }
+.org-tools { display:flex; gap:2px; }
+.org-tools button { background:none; border:1px solid transparent; border-radius:6px;
+  padding:2px 6px; color:var(--muted); cursor:pointer; font:inherit; font-size:13px; line-height:1; }
+.org-tools button:hover { border-color:var(--border); color:var(--ink); }
+.org-tools button.danger:hover { color:var(--critical); border-color:var(--critical); }
+.org-drop { min-height:34px; padding:8px; display:flex; flex-wrap:wrap; gap:6px; align-content:flex-start; }
+.org-drop.over { background:var(--tint-good); border-radius:0 0 9px 9px; }
+.org-drop:empty::before { content:"Drag firewalls here"; color:var(--muted); font-size:12px; padding:3px 2px; }
+.org-chip { display:inline-flex; align-items:center; gap:7px; background:var(--surface);
+  border:1px solid var(--border); border-radius:8px; padding:5px 9px; font-size:12.5px; cursor:grab; }
+.org-chip:active { cursor:grabbing; }
+.org-chip.dragging { opacity:.4; }
+.org-chip .grip { color:var(--muted); font-size:12px; letter-spacing:-1px; }
+.org-chip .port { color:var(--muted); font-size:11px; }
 
 /* system live view */
 .sysbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
@@ -220,6 +256,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
         <div class="menu-sep"></div>
         <button class="menu-item" id="usersBtn" role="menuitem" style="display:none">Manage users</button>
         <button class="menu-item" id="keysBtn" role="menuitem" style="display:none">Manage API keys</button>
+        <button class="menu-item" id="orgBtn" role="menuitem" style="display:none">Organize systems</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
         <div class="menu-sep"></div>
@@ -235,7 +272,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   <div id="page-overview">
     <div class="tiles" id="tiles"></div>
     <h2>Systems</h2>
-    <div class="sys-grid" id="sysGrid"></div>
+    <div id="sysWrap"></div>
   </div>
 
   <!-- Single-system live log (reused for whichever system is selected) -->
@@ -394,6 +431,28 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   </div>
 </div>
 
+<!-- Organize-systems modal (admin) -->
+<div class="modal-back" id="orgModal">
+  <div class="modal" style="max-width:620px">
+    <h3>Organize systems</h3>
+    <div class="sub">Group your firewalls into categories and drag them into the
+      order you want on the Overview. This is display-only — it never touches
+      your <code>devices.json</code>, so keep that in any order (e.g. by UDP
+      port). Everyone sees the same arrangement.</div>
+    <div class="org-add">
+      <input id="orgNewCat" type="text" maxlength="64" autocomplete="off"
+             placeholder="New category name (e.g. Core network)">
+      <button id="orgAddCat">Add category</button>
+    </div>
+    <div id="orgBoard"></div>
+    <div class="msg" id="orgMsg"></div>
+    <div class="actions">
+      <button id="orgClose">Cancel</button>
+      <button class="primary" id="orgSave">Save layout</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
@@ -455,6 +514,7 @@ async function loadMe() {
   $("whoEmail").textContent = me.email || "no email set";
   $("usersBtn").style.display = me.role === "admin" ? "" : "none";
   $("keysBtn").style.display = me.role === "admin" ? "" : "none";
+  $("orgBtn").style.display = me.role === "admin" ? "" : "none";
   $("userbar").style.display = "";
   if (me.must_change_pw) { openPw(true); }
 }
@@ -477,6 +537,13 @@ async function setMyEmail() {
 
 let view = "overview";      // "overview" or a device name
 let stats = null;
+let layout = null;          // {categories:[{name,devices}], uncategorized:[]}
+async function fetchLayout() {
+  try {
+    const res = await fetch("/api/layout");
+    if (res.ok) { layout = await res.json(); if (view === "overview") renderOverview(); }
+  } catch (e) {}
+}
 let events = [], cursor = 0, liveTimer = null;
 // Bumped on every view/filter change; in-flight fetches capture it and
 // discard their response if it changed, so a slow reply for the previous
@@ -532,9 +599,37 @@ function renderOverview() {
   $("tiles").innerHTML = tiles.map(([l,v,s]) =>
     `<div class="card tile"><div class="l">${esc(l)}</div>
      <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
-  $("sysGrid").innerHTML = devs.map(d => {
-    const st = statusOf(d, now);
-    return `<div class="sys-card ${st.cls}" data-view="${esc(d.name)}">
+  const groups = layoutGroups(devs);
+  if (!groups) {
+    $("sysWrap").innerHTML = `<div class="sys-grid">${
+      devs.map(d => sysCardHtml(d, now)).join("")}</div>`;
+  } else {
+    $("sysWrap").innerHTML = groups.map(g => {
+      const recv = g.devs.filter(d => statusOf(d, now).cls === "receiving").length;
+      const collapsed = catCollapsed(g.name);
+      return `<section class="sys-cat${collapsed ? " collapsed" : ""}" data-cat="${esc(g.name)}">
+        <button class="cat-head" type="button">
+          <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4 6l4 4 4-4z"></path></svg>
+          <span class="cat-name">${esc(g.name)}</span>
+          <span class="cat-count">${recv}/${g.devs.length}</span>
+          ${recv ? '<span class="cat-recv" title="receiving"></span>' : ""}
+        </button>
+        <div class="sys-grid">${g.devs.map(d => sysCardHtml(d, now)).join("")}</div>
+      </section>`;
+    }).join("");
+    $("sysWrap").querySelectorAll(".cat-head").forEach(h =>
+      h.addEventListener("click", () => {
+        const sec = h.closest(".sys-cat");
+        const on = sec.classList.toggle("collapsed");
+        setCatCollapsed(sec.dataset.cat, on);
+      }));
+  }
+  $("sysWrap").querySelectorAll(".sys-card").forEach(c =>
+    c.addEventListener("click", () => go(c.dataset.view)));
+}
+function sysCardHtml(d, now) {
+  const st = statusOf(d, now);
+  return `<div class="sys-card ${st.cls}" data-view="${esc(d.name)}">
       <div class="name">${esc(d.name)}</div>
       <div class="meta">${esc(VENDOR_LABEL[d.vendor]||d.vendor)} · udp/${d.port}</div>
       <div class="row">
@@ -546,9 +641,27 @@ function renderOverview() {
         <span class="sub">${fmt(d.events)} total</span>
       </div>
     </div>`;
-  }).join("");
-  $("sysGrid").querySelectorAll(".sys-card").forEach(c =>
-    c.addEventListener("click", () => go(c.dataset.view)));
+}
+// Resolve the saved layout into renderable groups of live device objects, or
+// null when no categories are defined (fall back to a flat grid).
+function layoutGroups(devs) {
+  if (!layout || !layout.categories || !layout.categories.length) return null;
+  const byName = {};
+  devs.forEach(d => byName[d.name] = d);
+  const out = [];
+  layout.categories.forEach(c => {
+    const list = c.devices.map(n => byName[n]).filter(Boolean);
+    if (list.length) out.push({ name: c.name, devs: list });
+  });
+  const unc = (layout.uncategorized || []).map(n => byName[n]).filter(Boolean);
+  if (unc.length) out.push({ name: "Uncategorized", devs: unc });
+  return out.length ? out : null;
+}
+function catCollapsed(name) {
+  try { return localStorage.getItem("fll.cat." + name) === "1"; } catch (e) { return false; }
+}
+function setCatCollapsed(name, on) {
+  try { localStorage.setItem("fll.cat." + name, on ? "1" : "0"); } catch (e) {}
 }
 
 function renderFleetPill() {
@@ -1100,6 +1213,163 @@ $("nkCreate").addEventListener("click", async () => {
     refreshKeys();
   } catch (e) { modalMsg("keysMsg", "Network error."); }
 });
+/* ---------------- Organize systems (admin) ---------------- */
+let orgDragged = null, orgDevInfo = {}, orgDevOrder = [];
+function orgChipHtml(name) {
+  const d = orgDevInfo[name] || {};
+  return `<div class="org-chip" draggable="true" data-dev="${esc(name)}">
+    <span class="grip">⠿</span>${esc(name)}${
+    d.port ? `<span class="port">udp/${d.port}</span>` : ""}</div>`;
+}
+function renderBoard(cats) {
+  const placed = new Set();
+  cats.forEach(c => c.devices.forEach(n => placed.add(n)));
+  const uncat = orgDevOrder.filter(n => !placed.has(n));
+  let html = cats.map((c, i) => `
+    <section class="org-cat" data-i="${i}">
+      <div class="org-cat-head">
+        <span class="org-cat-name">${esc(c.name)}</span>
+        <span class="org-tools">
+          <button data-up title="Move category up">▲</button>
+          <button data-down title="Move category down">▼</button>
+          <button data-rename title="Rename">✎</button>
+          <button class="danger" data-del title="Delete category">✕</button>
+        </span>
+      </div>
+      <div class="org-drop">${c.devices.map(orgChipHtml).join("")}</div>
+    </section>`).join("");
+  html += `<section class="org-cat uncat">
+      <div class="org-cat-head"><span class="org-cat-name">Uncategorized</span></div>
+      <div class="org-drop">${uncat.map(orgChipHtml).join("")}</div>
+    </section>`;
+  $("orgBoard").innerHTML = html;
+  wireBoard();
+}
+function readBoard() {
+  const cats = [];
+  $("orgBoard").querySelectorAll(".org-cat:not(.uncat)").forEach(sec => {
+    cats.push({
+      name: sec.querySelector(".org-cat-name").textContent,
+      devices: [...sec.querySelectorAll(".org-chip")].map(ch => ch.dataset.dev),
+    });
+  });
+  return cats;
+}
+function dragAfter(container, x, y) {
+  const chips = [...container.querySelectorAll(".org-chip:not(.dragging)")];
+  let best = null, bestDist = Infinity, before = true;
+  for (const c of chips) {
+    const r = c.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const d = Math.hypot(x - cx, y - cy);
+    if (d < bestDist) {
+      bestDist = d; best = c;
+      before = (y < cy - r.height / 2) || (Math.abs(y - cy) <= r.height / 2 && x < cx);
+    }
+  }
+  if (!best) return null;
+  return before ? best : best.nextElementSibling;
+}
+function wireBoard() {
+  const board = $("orgBoard");
+  board.querySelectorAll(".org-cat:not(.uncat)").forEach(sec => {
+    const i = Number(sec.dataset.i);
+    sec.querySelector("[data-up]").addEventListener("click", () => moveCat(i, -1));
+    sec.querySelector("[data-down]").addEventListener("click", () => moveCat(i, 1));
+    sec.querySelector("[data-rename]").addEventListener("click", () => renameCat(i));
+    sec.querySelector("[data-del]").addEventListener("click", () => delCat(i));
+  });
+  board.querySelectorAll(".org-chip").forEach(chip => {
+    chip.addEventListener("dragstart", e => {
+      orgDragged = chip; chip.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", chip.dataset.dev);   // Firefox needs data
+    });
+    chip.addEventListener("dragend", () => {
+      chip.classList.remove("dragging"); orgDragged = null;
+      board.querySelectorAll(".org-drop.over").forEach(d => d.classList.remove("over"));
+    });
+  });
+  board.querySelectorAll(".org-drop").forEach(drop => {
+    drop.addEventListener("dragover", e => {
+      if (!orgDragged) return;
+      e.preventDefault();
+      drop.classList.add("over");
+      const after = dragAfter(drop, e.clientX, e.clientY);
+      if (after == null) drop.appendChild(orgDragged);
+      else drop.insertBefore(orgDragged, after);
+    });
+    drop.addEventListener("dragleave", e => {
+      if (!drop.contains(e.relatedTarget)) drop.classList.remove("over");
+    });
+    drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); });
+  });
+}
+function moveCat(i, dir) {
+  const cats = readBoard(), j = i + dir;
+  if (j < 0 || j >= cats.length) return;
+  [cats[i], cats[j]] = [cats[j], cats[i]];
+  renderBoard(cats);
+}
+function renameCat(i) {
+  const cats = readBoard();
+  const nn = window.prompt("Rename category:", cats[i].name);
+  if (nn === null) return;
+  const name = nn.trim();
+  if (!name) return;
+  if (name.toLowerCase() === "uncategorized")
+    return modalMsg("orgMsg", "“Uncategorized” is a reserved name.");
+  if (cats.some((c, j) => j !== i && c.name.toLowerCase() === name.toLowerCase()))
+    return modalMsg("orgMsg", "Another category already has that name.");
+  modalMsg("orgMsg", ""); cats[i].name = name; renderBoard(cats);
+}
+function delCat(i) {
+  const cats = readBoard();
+  if (cats[i].devices.length && !window.confirm(
+      `Delete "${cats[i].name}"? Its firewalls move to Uncategorized.`)) return;
+  cats.splice(i, 1); renderBoard(cats);
+}
+async function openOrg() {
+  modalMsg("orgMsg", ""); $("orgNewCat").value = "";
+  orgDevInfo = {}; orgDevOrder = [];
+  let devs = stats && stats.devices ? stats.devices : null;
+  if (!devs) { try { devs = await (await fetch("/api/devices")).json(); } catch (e) { devs = []; } }
+  devs.forEach(d => { orgDevInfo[d.name] = { port: d.port, vendor: d.vendor }; orgDevOrder.push(d.name); });
+  let cats = [];
+  try {
+    const l = await (await fetch("/api/layout")).json();
+    cats = (l.categories || []).map(c => ({ name: c.name, devices: c.devices.slice() }));
+  } catch (e) {}
+  renderBoard(cats);
+  $("orgModal").classList.add("open");
+}
+$("orgBtn").addEventListener("click", openOrg);
+$("orgClose").addEventListener("click", () => $("orgModal").classList.remove("open"));
+$("orgAddCat").addEventListener("click", () => {
+  const name = $("orgNewCat").value.trim();
+  if (!name) return;
+  if (name.toLowerCase() === "uncategorized")
+    return modalMsg("orgMsg", "“Uncategorized” is a reserved name.");
+  const cats = readBoard();
+  if (cats.some(c => c.name.toLowerCase() === name.toLowerCase()))
+    return modalMsg("orgMsg", "That category already exists.");
+  cats.push({ name, devices: [] });
+  $("orgNewCat").value = ""; modalMsg("orgMsg", "");
+  renderBoard(cats);
+});
+$("orgNewCat").addEventListener("keydown", e => { if (e.key === "Enter") $("orgAddCat").click(); });
+$("orgSave").addEventListener("click", async () => {
+  const cats = readBoard();
+  try {
+    const res = await apiSend("POST", "/api/layout", { categories: cats });
+    if (gone(res)) return;
+    const data = await res.json();
+    if (!res.ok) return modalMsg("orgMsg", data.error || "Could not save the layout.");
+    layout = { categories: data.categories, uncategorized: data.uncategorized };
+    if (view === "overview") renderOverview();
+    $("orgModal").classList.remove("open");
+  } catch (e) { modalMsg("orgMsg", "Network error."); }
+});
 $("logoutBtn").addEventListener("click", async () => {
   try { await apiSend("POST", "/api/logout"); } catch (e) {}
   toLogin();
@@ -1107,6 +1377,7 @@ $("logoutBtn").addEventListener("click", async () => {
 
 loadMe();
 loadStats();
+fetchLayout();           // overview grouping/order (re-renders when it lands)
 setInterval(loadStats, 5000);
 restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)
 </script>
