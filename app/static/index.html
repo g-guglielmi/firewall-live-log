@@ -117,8 +117,9 @@ button:hover,.btn:hover { border-color:var(--baseline); }
   padding:2px 6px; color:var(--muted); cursor:pointer; font:inherit; font-size:13px; line-height:1; }
 .org-tools button:hover { border-color:var(--border); color:var(--ink); }
 .org-tools button.danger:hover { color:var(--critical); border-color:var(--critical); }
-.org-drop { min-height:34px; padding:8px; display:flex; flex-wrap:wrap; gap:6px; align-content:flex-start; }
+.org-drop { position:relative; min-height:34px; padding:8px; display:flex; flex-wrap:wrap; gap:6px; align-content:flex-start; }
 .org-drop.over { background:var(--tint-good); border-radius:0 0 9px 9px; }
+.org-caret { position:absolute; width:2px; background:var(--accent); border-radius:2px; pointer-events:none; }
 .org-drop:empty::before { content:"Drag firewalls here"; color:var(--muted); font-size:12px; padding:3px 2px; }
 .org-chip { display:inline-flex; align-items:center; gap:7px; background:var(--surface);
   border:1px solid var(--border); border-radius:8px; padding:5px 9px; font-size:12.5px; cursor:grab; }
@@ -1214,7 +1215,7 @@ $("nkCreate").addEventListener("click", async () => {
   } catch (e) { modalMsg("keysMsg", "Network error."); }
 });
 /* ---------------- Organize systems (admin) ---------------- */
-let orgDragged = null, orgDevInfo = {}, orgDevOrder = [];
+let orgDragged = null, orgDevInfo = {}, orgDevOrder = [], orgCaretEl = null;
 function orgChipHtml(name) {
   const d = orgDevInfo[name] || {};
   return `<div class="org-chip" draggable="true" data-dev="${esc(name)}">
@@ -1255,8 +1256,12 @@ function readBoard() {
   });
   return cats;
 }
-function dragAfter(container, x, y) {
+// Which chip the dragged one would land *before* (null = append). Read-only:
+// it never moves a node, so the geometry it measures stays stable during a
+// drag — that's what stops the old back-and-forth flicker when chips wrap.
+function dropTarget(container, x, y) {
   const chips = [...container.querySelectorAll(".org-chip:not(.dragging)")];
+  if (!chips.length) return null;
   let best = null, bestDist = Infinity, before = true;
   for (const c of chips) {
     const r = c.getBoundingClientRect();
@@ -1267,8 +1272,32 @@ function dragAfter(container, x, y) {
       before = (y < cy - r.height / 2) || (Math.abs(y - cy) <= r.height / 2 && x < cx);
     }
   }
-  if (!best) return null;
-  return before ? best : best.nextElementSibling;
+  if (before) return best;
+  return chips[chips.indexOf(best) + 1] || null;
+}
+// A thin insertion caret shown during the drag. It's absolutely positioned,
+// so appending/moving it never reflows the chips (no oscillation).
+function showCaret(container, before) {
+  if (!orgCaretEl) { orgCaretEl = document.createElement("div"); orgCaretEl.className = "org-caret"; }
+  if (orgCaretEl.parentNode !== container) container.appendChild(orgCaretEl);
+  const cr = container.getBoundingClientRect();
+  let left, top, h;
+  if (before) {
+    const r = before.getBoundingClientRect();
+    left = r.left - cr.left - 4; top = r.top - cr.top; h = r.height;
+  } else {
+    const chips = [...container.querySelectorAll(".org-chip:not(.dragging)")];
+    if (chips.length) {
+      const r = chips[chips.length - 1].getBoundingClientRect();
+      left = r.right - cr.left + 2; top = r.top - cr.top; h = r.height;
+    } else { left = 8; top = 8; h = 24; }
+  }
+  orgCaretEl.style.left = left + "px";
+  orgCaretEl.style.top = top + "px";
+  orgCaretEl.style.height = h + "px";
+}
+function hideCaret() {
+  if (orgCaretEl && orgCaretEl.parentNode) orgCaretEl.parentNode.removeChild(orgCaretEl);
 }
 function wireBoard() {
   const board = $("orgBoard");
@@ -1286,23 +1315,27 @@ function wireBoard() {
       e.dataTransfer.setData("text/plain", chip.dataset.dev);   // Firefox needs data
     });
     chip.addEventListener("dragend", () => {
-      chip.classList.remove("dragging"); orgDragged = null;
+      chip.classList.remove("dragging"); orgDragged = null; hideCaret();
       board.querySelectorAll(".org-drop.over").forEach(d => d.classList.remove("over"));
     });
   });
   board.querySelectorAll(".org-drop").forEach(drop => {
     drop.addEventListener("dragover", e => {
       if (!orgDragged) return;
-      e.preventDefault();
+      e.preventDefault();                 // allow the drop
       drop.classList.add("over");
-      const after = dragAfter(drop, e.clientX, e.clientY);
-      if (after == null) drop.appendChild(orgDragged);
-      else drop.insertBefore(orgDragged, after);
+      showCaret(drop, dropTarget(drop, e.clientX, e.clientY));   // preview only
     });
     drop.addEventListener("dragleave", e => {
-      if (!drop.contains(e.relatedTarget)) drop.classList.remove("over");
+      if (!drop.contains(e.relatedTarget)) { drop.classList.remove("over"); hideCaret(); }
     });
-    drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); });
+    drop.addEventListener("drop", e => {
+      e.preventDefault(); drop.classList.remove("over"); hideCaret();
+      if (!orgDragged) return;
+      const before = dropTarget(drop, e.clientX, e.clientY);     // move exactly once
+      if (before) drop.insertBefore(orgDragged, before);
+      else drop.appendChild(orgDragged);
+    });
   });
 }
 function moveCat(i, dir) {
