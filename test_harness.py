@@ -480,9 +480,12 @@ def main():
     # blocked never exceeds total, fleet blocked = sum of per-device.
     check("per-device hist is 15 buckets ending in events_last_min",
           all(len(d["hist"]) == 15 and len(d["hist_blocked"]) == 15
+              and len(d["hist_nat"]) == 15
               and d["hist"][-1] == d["events_last_min"]
               and d["hist_blocked"][-1] == d["blocked_last_min"]
-              and all(b <= t for t, b in zip(d["hist"], d["hist_blocked"]))
+              and d["hist_nat"][-1] == d["nat_last_min"]
+              and all(b + na <= t for t, b, na
+                      in zip(d["hist"], d["hist_blocked"], d["hist_nat"]))
               for d in st["devices"]),
           str({k: (v["hist"][-1], v["events_last_min"]) for k, v in dmap.items()}))
     check("blocked_last_min counts the Drop/Block events",

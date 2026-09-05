@@ -158,7 +158,7 @@ _BLOCKED_SQL = "action IN ('Block','Drop','Reject')"
 
 
 def _completed_minutes(state, db, m0):
-    """Per-device (total, blocked) counts for the HIST_MINUTES-1 whole minutes
+    """Per-device (total, blocked, nat) counts for the HIST_MINUTES-1 whole minutes
     before m0 (a minute boundary). Those buckets can't change any more, so the
     result is cached per minute: one 14-minute index range-scan per minute
     instead of one per 5-second poll."""
@@ -168,15 +168,17 @@ def _completed_minutes(state, db, m0):
     n = HIST_MINUTES - 1
     base = m0 - n * 60
     out = {}
-    for dev, b, blk, cnt in db.execute(
-            f"SELECT device, (ts - ?) / 60, {_BLOCKED_SQL}, COUNT(*) "
+    for dev, b, action, cnt in db.execute(
+            "SELECT device, (ts - ?) / 60, action, COUNT(*) "
             "FROM events INDEXED BY idx_events_ts "
             "WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3", (base, base, m0)):
-        tot, blocked = out.setdefault(dev, ([0] * n, [0] * n))
+        tot, blocked, nat = out.setdefault(dev, ([0] * n, [0] * n, [0] * n))
         b = max(0, min(n - 1, int(b)))
         tot[b] += cnt
-        if blk:
+        if action in _BLOCKED:
             blocked[b] += cnt
+        elif action == "NAT":
+            nat[b] += cnt
     state._hist_cache = (m0, out)
     return out
 
@@ -216,7 +218,7 @@ def _stats(state):
         empty = [0] * (HIST_MINUTES - 1)
         for d in state.devices:
             ds = dev_stats.get(d.name, {})
-            tot, blk = hist.get(d.name, (empty, empty))
+            tot, blk, nat = hist.get(d.name, (empty, empty, empty))
             devices.append({**d.as_dict(),
                             "events": ds.get("total", 0),
                             "last_seen": ds.get("last_seen"),
@@ -224,7 +226,8 @@ def _stats(state):
                             "blocked_last_min": recent_blk.get(d.name, 0),
                             "nat_last_min": recent_nat.get(d.name, 0),
                             "hist": tot + [recent.get(d.name, 0)],
-                            "hist_blocked": blk + [recent_blk.get(d.name, 0)]})
+                            "hist_blocked": blk + [recent_blk.get(d.name, 0)],
+                            "hist_nat": nat + [recent_nat.get(d.name, 0)]})
         return {
             "events_last_min": sum(recent.values()),
             "blocked_last_min": sum(recent_blk.values()),

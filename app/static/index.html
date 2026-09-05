@@ -109,11 +109,13 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sys-card .big { font-size:20px; font-weight:650; }
 .sys-card .blk { color:var(--critical); font-size:12px; font-variant-numeric:tabular-nums; }
 .sys-card .nat { color:var(--nat); font-size:12px; font-variant-numeric:tabular-nums; }
-/* 15-minute sparkline: total bar in muted ink, blocked share in red on top */
+/* 15-minute sparkline: total bar in muted ink, blocked share (red) on the
+   baseline, NAT share (blue) stacked above it */
 .spark { display:flex; align-items:flex-end; gap:2px; height:30px; margin-top:12px; }
 .spark .bar { flex:1; display:flex; flex-direction:column; justify-content:flex-end;
   min-height:2px; background:var(--grid); border-radius:2px 2px 0 0; overflow:hidden; }
-.spark .bar > i { display:block; background:var(--critical); opacity:.85; }
+.spark .bar > i { display:block; flex:none; background:var(--critical); opacity:.85; }
+.spark .bar > i.n { background:var(--nat); }
 .spark .bar.now { background:var(--baseline); }
 .spark.flat { align-items:center; }
 .spark.flat .bar { height:2px; }
@@ -930,17 +932,20 @@ function sysCardHtml(d, now) {
 }
 // Last 15 minutes, one bar per minute (oldest left); the red share is blocked.
 function sparkHtml(d) {
-  const hist = d.hist || [], blk = d.hist_blocked || [];
+  const hist = d.hist || [], blk = d.hist_blocked || [], nat = d.hist_nat || [];
   const max = Math.max(1, ...hist);
   const flat = !hist.some(Boolean);
   const bars = hist.map((n, i) => {
     const hPct = flat ? 100 : Math.max(n ? 8 : 0, Math.round(n / max * 100));
     const bPct = n ? Math.round((blk[i] || 0) / n * 100) : 0;
-    const t = `${n} event${n === 1 ? "" : "s"}${blk[i] ? `, ${blk[i]} blocked` : ""}`;
-    // No inline height when flat, so the 2px baseline from .spark.flat applies.
-    return `<span class="bar${i === hist.length - 1 ? " now" : ""}"${flat ? "" : ` style="height:${hPct}%"`} title="${t}"><i style="height:${bPct}%"></i></span>`;
+    const nPct = n ? Math.round((nat[i] || 0) / n * 100) : 0;
+    const t = `${n} event${n === 1 ? "" : "s"}${blk[i] ? `, ${blk[i]} blocked` : ""}${nat[i] ? `, ${nat[i]} NAT` : ""}`;
+    // Bars stack from the baseline up (column, justify-end): red blocked share
+    // at the bottom, blue NAT share above it. No inline height when flat, so
+    // the 2px baseline from .spark.flat applies.
+    return `<span class="bar${i === hist.length - 1 ? " now" : ""}"${flat ? "" : ` style="height:${hPct}%"`} title="${t}"><i class="n" style="height:${nPct}%"></i><i style="height:${bPct}%"></i></span>`;
   }).join("");
-  return `<div class="spark${flat ? " flat" : ""}" title="Events per minute, last 15 min (red = blocked)">${bars}</div>`;
+  return `<div class="spark${flat ? " flat" : ""}" title="Events per minute, last 15 min (red = blocked, blue = NAT)">${bars}</div>`;
 }
 // Resolve the saved layout into renderable groups of live device objects, or
 // null when no categories are defined (fall back to a flat grid).
