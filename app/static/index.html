@@ -105,6 +105,7 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sys-card .name { font-weight:650; font-size:15px; }
 .sys-card .meta { color:var(--muted); font-size:12px; margin-top:2px; }
 .sys-card .row { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
+.sys-card .subrow { margin-top:4px; }   /* blocked / NAT counts, under the rate + total */
 .sys-card .rate { font-variant-numeric:tabular-nums; }
 .sys-card .big { font-size:20px; font-weight:650; }
 .sys-card .blk { color:var(--critical); font-size:12px; font-variant-numeric:tabular-nums; }
@@ -923,10 +924,12 @@ function sysCardHtml(d, now) {
       </div>
       ${sparkHtml(d)}
       <div class="row">
-        <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span>${
-          d.blocked_last_min ? ` <span class="blk">· ${fmt(d.blocked_last_min)} blocked</span>` : ""}${
-          d.nat_last_min ? ` <span class="nat">· ${fmt(d.nat_last_min)} NAT</span>` : ""}</span>
+        <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span></span>
         <span class="sub">${fmt(d.events)} total</span>
+      </div>
+      <div class="subrow">
+        <span class="${d.blocked_last_min ? "blk" : "sub"}">${fmt(d.blocked_last_min || 0)} blocked</span>${
+          d.nat_last_min ? ` <span class="sub">·</span> <span class="nat">${fmt(d.nat_last_min)} NAT</span>` : ""}
       </div>
     </div>`;
 }
@@ -937,8 +940,11 @@ function sparkHtml(d) {
   const flat = !hist.some(Boolean);
   const bars = hist.map((n, i) => {
     const hPct = flat ? 100 : Math.max(n ? 8 : 0, Math.round(n / max * 100));
-    const bPct = n ? Math.round((blk[i] || 0) / n * 100) : 0;
-    const nPct = n ? Math.round((nat[i] || 0) / n * 100) : 0;
+    // Floor a non-zero share to a visible hairline (a lone blocked/NAT event is
+    // a tiny % of a busy minute and would otherwise round to 0px). Cap the NAT
+    // share to whatever room the blocked share leaves so the two never overflow.
+    const bPct = blk[i] ? Math.min(100, Math.max(9, Math.round(blk[i] / n * 100))) : 0;
+    const nPct = nat[i] ? Math.min(100 - bPct, Math.max(9, Math.round(nat[i] / n * 100))) : 0;
     const t = `${n} event${n === 1 ? "" : "s"}${blk[i] ? `, ${blk[i]} blocked` : ""}${nat[i] ? `, ${nat[i]} NAT` : ""}`;
     // Bars stack from the baseline up (column, justify-end): red blocked share
     // at the bottom, blue NAT share above it. No inline height when flat, so
