@@ -153,6 +153,7 @@ def _validate_layout(cats, valid_names):
 
 
 HIST_MINUTES = 15                    # sparkline width on the overview cards
+_BLOCKED = ("Block", "Drop", "Reject")
 _BLOCKED_SQL = "action IN ('Block','Drop','Reject')"
 
 
@@ -191,14 +192,16 @@ def _stats(state):
         # to skip the GROUP BY sort and then scans the *whole* table to apply
         # the ts filter (seconds on a multi-GB DB, every stats poll). INDEXED
         # BY makes it range-scan just the last 60 s and group those few rows.
-        recent, recent_blk = {}, {}
-        for dev, blk, cnt in db.execute(
-                f"SELECT device, {_BLOCKED_SQL}, COUNT(*) FROM events "
+        recent, recent_blk, recent_nat = {}, {}, {}
+        for dev, action, cnt in db.execute(
+                "SELECT device, action, COUNT(*) FROM events "
                 "INDEXED BY idx_events_ts WHERE ts >= ? GROUP BY 1, 2",
                 (now - 60,)):
             recent[dev] = recent.get(dev, 0) + cnt
-            if blk:
+            if action in _BLOCKED:
                 recent_blk[dev] = recent_blk.get(dev, 0) + cnt
+            elif action == "NAT":
+                recent_nat[dev] = recent_nat.get(dev, 0) + cnt
         # Sparkline: 14 completed minutes (cached) + the rolling last-60s
         # bucket, so the last bar always equals the /min figure on the card.
         hist = _completed_minutes(state, db, now // 60 * 60)
@@ -219,11 +222,13 @@ def _stats(state):
                             "last_seen": ds.get("last_seen"),
                             "events_last_min": recent.get(d.name, 0),
                             "blocked_last_min": recent_blk.get(d.name, 0),
+                            "nat_last_min": recent_nat.get(d.name, 0),
                             "hist": tot + [recent.get(d.name, 0)],
                             "hist_blocked": blk + [recent_blk.get(d.name, 0)]})
         return {
             "events_last_min": sum(recent.values()),
             "blocked_last_min": sum(recent_blk.values()),
+            "nat_last_min": sum(recent_nat.values()),
             "oldest": span[0], "newest": span[1],
             "db_bytes": store.db_disk_bytes(state.db_path),
             "retention_days": state.cfg.retention_days,

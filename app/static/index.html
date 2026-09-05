@@ -93,6 +93,7 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .tile .v { font-size:20px; font-weight:650; line-height:1.25; margin-top:1px; }
 .tile .s { color:var(--muted); font-size:12px; margin-top:1px; }
 .tile.warn .v { color:var(--serious); }   /* dropped / unparsed above zero */
+.tile.nat .v { color:var(--nat); }         /* NAT / forward — matches the log tint */
 .sys-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
 .sys-card { background:var(--surface); border:1px solid var(--border);
   border-radius:12px; padding:14px 15px; cursor:pointer; transition:border-color .1s; }
@@ -107,6 +108,7 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .sys-card .rate { font-variant-numeric:tabular-nums; }
 .sys-card .big { font-size:20px; font-weight:650; }
 .sys-card .blk { color:var(--critical); font-size:12px; font-variant-numeric:tabular-nums; }
+.sys-card .nat { color:var(--nat); font-size:12px; font-variant-numeric:tabular-nums; }
 /* 15-minute sparkline: total bar in muted ink, blocked share in red on top */
 .spark { display:flex; align-items:flex-end; gap:2px; height:30px; margin-top:12px; }
 .spark .bar { flex:1; display:flex; flex-direction:column; justify-content:flex-end;
@@ -868,6 +870,7 @@ function renderOverview() {
   const tiles = [
     ["Events / min", fmt(stats.events_last_min), "across the fleet", ""],
     ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject", ""],
+    ["NAT / min", fmt(stats.nat_last_min || 0), "DNAT · SNAT · forward", "", false, "nat"],
     ["Events received", fmtCompact(stats.parsed), span, fmt(stats.parsed) + " events since first start"],
     ["Disk usage", fmtBytes(stats.db_bytes),
       stats.retention_days + "-day retention" + (stats.max_events ? " · cap " + fmtCompact(stats.max_events) : ""),
@@ -875,8 +878,8 @@ function renderOverview() {
     ["Dropped", fmtCompact(stats.dropped), "lost to queue overflow", fmt(stats.dropped), stats.dropped > 0],
     ["Unparsed", fmtCompact(stats.unparsed), "kept for diagnosis", fmt(stats.unparsed) + " lines didn't match a known format", stats.unparsed > 0],
   ];
-  $("tiles").innerHTML = tiles.map(([l,v,s,t,warn]) =>
-    `<div class="card tile${warn ? " warn" : ""}"${t ? ` title="${esc(t)}"` : ""}><div class="l">${esc(l)}</div>
+  $("tiles").innerHTML = tiles.map(([l,v,s,t,warn,cls]) =>
+    `<div class="card tile${warn ? " warn" : ""}${cls ? " " + cls : ""}"${t ? ` title="${esc(t)}"` : ""}><div class="l">${esc(l)}</div>
      <div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join("");
   const groups = layoutGroups(devs);
   $("sysHead").style.display = groups ? "none" : "";   // group headers replace it
@@ -919,7 +922,8 @@ function sysCardHtml(d, now) {
       ${sparkHtml(d)}
       <div class="row">
         <span><span class="big rate">${fmt(d.events_last_min)}</span> <span class="sub">/min</span>${
-          d.blocked_last_min ? ` <span class="blk">· ${fmt(d.blocked_last_min)} blocked</span>` : ""}</span>
+          d.blocked_last_min ? ` <span class="blk">· ${fmt(d.blocked_last_min)} blocked</span>` : ""}${
+          d.nat_last_min ? ` <span class="nat">· ${fmt(d.nat_last_min)} NAT</span>` : ""}</span>
         <span class="sub">${fmt(d.events)} total</span>
       </div>
     </div>`;

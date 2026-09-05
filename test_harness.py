@@ -490,6 +490,11 @@ def main():
           and st["blocked_last_min"] == sum(d["blocked_last_min"] for d in st["devices"])
           and st["blocked_last_min"] < st["events_last_min"],
           str({k: v["blocked_last_min"] for k, v in dmap.items()}))
+    check("nat_last_min counts the NAT/forward events",
+          dmap["UDM-Test"]["nat_last_min"] == 5
+          and st["nat_last_min"] == sum(d["nat_last_min"] for d in st["devices"])
+          and st["nat_last_min"] < st["events_last_min"],
+          str({k: v["nat_last_min"] for k, v in dmap.items()}))
     with _OPENER.open(urllib.request.Request(
             BASE + "/api/events.csv?window=86400"), timeout=10) as r:
         csv_text = r.read().decode()
