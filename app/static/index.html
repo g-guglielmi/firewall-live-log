@@ -93,6 +93,7 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 .tile .v { font-size:20px; font-weight:650; line-height:1.25; margin-top:1px; }
 .tile .s { color:var(--muted); font-size:12px; margin-top:1px; }
 .tile.warn .v { color:var(--serious); }   /* dropped / unparsed above zero */
+.tile.blk .v { color:var(--critical); }    /* blocked — matches the red used elsewhere */
 .tile.nat .v { color:var(--nat); }         /* NAT / forward — matches the log tint */
 .sys-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
 .sys-card { background:var(--surface); border:1px solid var(--border);
@@ -872,7 +873,7 @@ function renderOverview() {
   // the counters that only matter when non-zero go in the health strip.
   const tiles = [
     ["Events / min", fmt(stats.events_last_min), "across the fleet", ""],
-    ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject", ""],
+    ["Blocked / min", fmt(stats.blocked_last_min || 0), "Block · Drop · Reject", "", false, "blk"],
     ["NAT / min", fmt(stats.nat_last_min || 0), "DNAT · SNAT · forward", "", false, "nat"],
     ["Events received", fmtCompact(stats.parsed), span, fmt(stats.parsed) + " events since first start"],
     ["Disk usage", fmtBytes(stats.db_bytes),
