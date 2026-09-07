@@ -1378,8 +1378,15 @@ function go(target, opts) {
   const isSys = target !== "overview";
   $("page-overview").style.display = isSys ? "none" : "";
   $("page-system").style.display = isSys ? "" : "none";
+  $("toLive").hidden = true;   // the floating jump-to-live pill belongs to a
+                               // live device view only — never leak it onto
+                               // the overview or a fresh view via fixed pos.
   renderTabs();
   if (isSys) {
+    // Start pinned to the newest row (following), not wherever the previous
+    // page was scrolled — otherwise a leftover page scroll reads as "browsing".
+    window.scrollTo(0, 0);
+    $("log").parentElement.scrollTop = 0;
     setSysHeader();
     $("fSrc").value = (st && st.src) || "";
     $("fDst").value = (st && st.dst) || "";
