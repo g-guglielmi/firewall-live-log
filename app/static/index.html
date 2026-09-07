@@ -465,7 +465,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
 
 <!-- Floating "back to live" control for phones, where the toolbar Pause /
      Jump-to-live button scrolls off with the page. -->
-<button id="toLive" hidden>↑ Jump to live</button>
+<button id="toLive" style="display:none">↑ Jump to live</button>
 
 <!-- Change-password modal -->
 <div class="modal-back" id="pwModal">
@@ -1181,6 +1181,20 @@ function scRefTop(sc) {
   return sc === document.scrollingElement ? 0 : sc.getBoundingClientRect().top;
 }
 function atLiveTop() { return liveScroller().scrollTop <= 4; }
+// The floating jump-to-live pill is a phone-only affordance: it exists ONLY
+// while a LIVE DEVICE view is scrolled off the top (the tail is frozen). It
+// must never appear on the overview, in a history window, or before scrolling
+// — so recompute the whole condition here rather than toggling it piecemeal.
+function updateJumpPill() {
+  const show = view !== "overview"
+    && $("fMode").value === "live"
+    && liveScroller() === document.scrollingElement   // page-scrolls (phone)
+    && !atLiveTop();
+  // Toggle inline display (not the `hidden` attribute): the app's
+  // `button { display:inline-block }` rule is author-origin and overrides the
+  // UA `[hidden]` rule, so `hidden` would never actually hide a button here.
+  $("toLive").style.display = show ? "" : "none";
+}
 // Return to the top and follow live: flush anything parked, clear a manual
 // pause, pin to the newest row. This is what the Pause button becomes while
 // the view is scrolled away from the top.
@@ -1199,11 +1213,9 @@ function updateLiveUi() {
   const live = view !== "overview" && $("fMode").value === "live";
   $("liveInd").style.display = live ? "" : "none";
   $("fPause").style.display = live ? "" : "none";
-  if (!live) { $("toLive").hidden = true; return; }
+  updateJumpPill();
+  if (!live) return;
   const scrolledUp = !atLiveTop(), parked = pending.length;
-  // On a page-scrolling (phone) layout the toolbar button scrolls out of reach,
-  // so surface a floating jump-to-live pill while browsing back.
-  $("toLive").hidden = !(scrolledUp && liveScroller() === document.scrollingElement);
   const stuck = scrolledUp && !paused && parked > 0;   // frozen while reading
   $("liveInd").className = "live-ind" + (paused ? " paused" : stuck ? " stuck" : "");
   $("liveInd").innerHTML = `<span class="pulse"></span>` + (paused
@@ -1378,9 +1390,7 @@ function go(target, opts) {
   const isSys = target !== "overview";
   $("page-overview").style.display = isSys ? "none" : "";
   $("page-system").style.display = isSys ? "" : "none";
-  $("toLive").hidden = true;   // the floating jump-to-live pill belongs to a
-                               // live device view only — never leak it onto
-                               // the overview or a fresh view via fixed pos.
+  $("toLive").style.display = "none";   // clear immediately; updateJumpPill re-decides
   renderTabs();
   if (isSys) {
     // Start pinned to the newest row (following), not wherever the previous
@@ -1525,6 +1535,7 @@ function onLogScroll() {
     // Reaching the top resumes the live tail (flushing anything parked and
     // releasing any paged-back history); crossing the edge flips the button.
     if (top && !paused && (pending.length || browsingOlder)) { jumpToLive(); liveWasTop = true; return; }
+    updateJumpPill();                              // show/hide the pill as we scroll
     if (top !== liveWasTop) { liveWasTop = top; updateLiveUi(); }
   }
   // Near the bottom? Pull in older history — the buffered rows first, then the
