@@ -173,6 +173,9 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(12,163,12,.55); } 100% { box-shadow:0 0 0 7px rgba(12,163,12,0); } }
 .live-ind.paused { color:var(--warning); border-color:var(--warning); }
 .live-ind.paused .pulse { animation:none; background:var(--warning); }
+/* Scrolled up: the stream is still live but parked. Clickable to jump back. */
+.live-ind.stuck { color:var(--warning); border-color:var(--warning); cursor:pointer; }
+.live-ind.stuck .pulse { background:var(--warning); }
 .iconbtn { width:30px; padding:6px 0; text-align:center; font-weight:650; }
 .helpwrap { position:relative; display:inline-block; }
 .help-pop { position:absolute; right:0; top:calc(100% + 8px); width:290px; z-index:40; display:none;
@@ -1140,23 +1143,35 @@ function updateLoadMore() {
 }
 // Live badge + Pause/Resume. Pausing keeps polling but parks new events in
 // `pending`, so the badge can say how much arrived and nothing is lost.
+// The live tail only "follows" while pinned to the newest row (the top).
+// Scroll up to read and the stream freezes — new events are parked in
+// `pending`, not rendered — so a row you're reading is never trimmed out
+// from under you at the SHOW cap. Scroll back to the top and it catches up.
+function liveScroller() { return $("log").parentElement; }   // .table-scroll
+function atLiveTop() { return liveScroller().scrollTop <= 4; }
+function catchUp() {
+  if (pending.length) {
+    events.push(...pending); pending = [];
+    if (events.length > KEEP) events = events.slice(-KEEP);
+    renderLog();
+    liveScroller().scrollTop = 0;
+  }
+  updateLiveUi();
+}
 function updateLiveUi() {
   const live = view !== "overview" && $("fMode").value === "live";
   $("liveInd").style.display = live ? "" : "none";
   $("fPause").style.display = live ? "" : "none";
-  $("liveInd").className = "live-ind" + (paused ? " paused" : "");
+  const stuck = live && !paused && pending.length > 0;
+  $("liveInd").className = "live-ind" + (paused ? " paused" : stuck ? " stuck" : "");
   $("liveInd").innerHTML = `<span class="pulse"></span>` + (paused
-    ? "Paused" + (pending.length ? ` · ${fmt(pending.length)} new` : "") : "Live");
+    ? "Paused" + (pending.length ? ` · ${fmt(pending.length)} new` : "")
+    : stuck ? `${fmt(pending.length)} new · scroll up` : "Live");
   $("fPause").textContent = paused ? "Resume" : "Pause";
 }
 function setPaused(on) {
   paused = on;
-  if (!on && pending.length) {
-    events.push(...pending); pending = [];
-    if (events.length > KEEP) events = events.slice(-KEEP);
-    renderLog();
-  }
-  updateLiveUi();
+  if (!on) catchUp(); else updateLiveUi();
 }
 let liveInFlight = false;
 async function pollLive() {
@@ -1175,7 +1190,7 @@ async function pollLive() {
     if (res.cursor < cursor) { events = []; pending = []; }   // db pruned / restarted
     cursor = res.cursor;
     if (res.events.length) {
-      if (paused) {
+      if (paused || !atLiveTop()) {           // manual pause, or scrolled up
         pending.push(...res.events);
         if (pending.length > KEEP) pending = pending.slice(-KEEP);
         updateLiveUi();
@@ -1418,6 +1433,15 @@ $("rNow").addEventListener("click",
 ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refilter, 350)));
 $("fAct").addEventListener("change", refilter);
 $("fPause").addEventListener("click", () => setPaused(!paused));
+// Returning to the top catches up on anything parked while scrolled away.
+$("log").parentElement.addEventListener("scroll", () => {
+  if (view === "overview" || $("fMode").value !== "live" || paused) return;
+  if (atLiveTop() && pending.length) catchUp();
+}, { passive: true });
+// The "N new · scroll up" badge jumps you back to live.
+$("liveInd").addEventListener("click", () => {
+  if ($("liveInd").classList.contains("stuck")) catchUp();
+});
 $("fClear").addEventListener("click", () => {
   ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refilter();
 });
