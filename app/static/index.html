@@ -1149,29 +1149,44 @@ function updateLoadMore() {
 // from under you at the SHOW cap. Scroll back to the top and it catches up.
 function liveScroller() { return $("log").parentElement; }   // .table-scroll
 function atLiveTop() { return liveScroller().scrollTop <= 4; }
-function catchUp() {
+// Return to the top and follow live: flush anything parked, clear a manual
+// pause, pin to the newest row. This is what the Pause button becomes while
+// the view is scrolled away from the top.
+function jumpToLive() {
+  paused = false;
   if (pending.length) {
     events.push(...pending); pending = [];
     if (events.length > KEEP) events = events.slice(-KEEP);
-    renderLog();
-    liveScroller().scrollTop = 0;
   }
+  renderLog();
+  liveScroller().scrollTop = 0;
   updateLiveUi();
 }
 function updateLiveUi() {
   const live = view !== "overview" && $("fMode").value === "live";
   $("liveInd").style.display = live ? "" : "none";
   $("fPause").style.display = live ? "" : "none";
-  const stuck = live && !paused && pending.length > 0;
+  if (!live) return;
+  const scrolledUp = !atLiveTop(), parked = pending.length;
+  const stuck = scrolledUp && !paused && parked > 0;   // frozen while reading
   $("liveInd").className = "live-ind" + (paused ? " paused" : stuck ? " stuck" : "");
   $("liveInd").innerHTML = `<span class="pulse"></span>` + (paused
-    ? "Paused" + (pending.length ? ` · ${fmt(pending.length)} new` : "")
-    : stuck ? `${fmt(pending.length)} new · scroll up` : "Live");
-  $("fPause").textContent = paused ? "Resume" : "Pause";
+    ? "Paused" + (parked ? ` · ${fmt(parked)} new` : "")
+    : stuck ? `${fmt(parked)} new` : "Live");
+  // The button doubles as "back to live" whenever the view is scrolled away
+  // from the top; at the top it's the usual pause/resume toggle.
+  if (scrolledUp) {
+    $("fPause").textContent = "Jump to live";
+    $("fPause").title = "Return to the top and follow the live tail";
+  } else {
+    $("fPause").textContent = paused ? "Resume" : "Pause";
+    $("fPause").title = paused ? "Resume the live tail"
+      : "Pause the live tail (new events are counted, not lost)";
+  }
 }
 function setPaused(on) {
   paused = on;
-  if (!on) catchUp(); else updateLiveUi();
+  if (!on) jumpToLive(); else updateLiveUi();
 }
 let liveInFlight = false;
 async function pollLive() {
@@ -1432,16 +1447,21 @@ $("rNow").addEventListener("click",
   e => { if (e.key === "Enter") applyRange(); }));
 ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).addEventListener("input", debounce(refilter, 350)));
 $("fAct").addEventListener("change", refilter);
-$("fPause").addEventListener("click", () => setPaused(!paused));
-// Returning to the top catches up on anything parked while scrolled away.
-$("log").parentElement.addEventListener("scroll", () => {
-  if (view === "overview" || $("fMode").value !== "live" || paused) return;
-  if (atLiveTop() && pending.length) catchUp();
-}, { passive: true });
-// The "N new · scroll up" badge jumps you back to live.
-$("liveInd").addEventListener("click", () => {
-  if ($("liveInd").classList.contains("stuck")) catchUp();
+$("fPause").addEventListener("click", () => {
+  if (!atLiveTop()) jumpToLive();     // scrolled up: the button returns to live
+  else setPaused(!paused);            // at the top: the usual pause/resume
 });
+// Track scroll: reaching the top on your own catches up and resumes following;
+// crossing the top edge flips the button between "Pause" and "Jump to live".
+let liveWasTop = true;
+$("log").parentElement.addEventListener("scroll", () => {
+  if (view === "overview" || $("fMode").value !== "live") return;
+  const top = atLiveTop();
+  if (top && !paused && pending.length) { jumpToLive(); liveWasTop = true; return; }
+  if (top !== liveWasTop) { liveWasTop = top; updateLiveUi(); }
+}, { passive: true });
+// The parked-count badge is also a shortcut back to live.
+$("liveInd").addEventListener("click", () => { if (!atLiveTop()) jumpToLive(); });
 $("fClear").addEventListener("click", () => {
   ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refilter();
 });
