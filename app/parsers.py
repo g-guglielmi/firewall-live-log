@@ -76,7 +76,8 @@ _U_KEYWORDS = [("allow", "Allow"), ("accept", "Allow"), ("reject", "Reject"),
                ("drop", "Drop"), ("block", "Block"), ("deny", "Block")]
 # NAT/forward markers: a DNAT/SNAT/masquerade/port-forward line is a
 # translation record, not a filter verdict.  Matched as whole words so
-# "nat" can't fire on substrings like "donate".
+# "nat" can't fire on substrings like "donate".  Shared by both vendors —
+# UniFi keys off the rule DESCR, Sophos off fw_rule_name.
 _U_NAT = re.compile(r"\b(?:d?nat|snat|masquerade|port[\s_-]?forward)\b", re.I)
 
 
@@ -130,12 +131,23 @@ _S_ACTION = {
 _S_ACTION_FIELDS = ("log_subtype", "status", "fw_rule_action", "action")
 
 
-def _sophos_action(kv):
+def _sophos_action(kv, rule):
+    verdict = "?"
     for field in _S_ACTION_FIELDS:
         v = kv.get(field)
         if v and v.lower() in _S_ACTION:
-            return _S_ACTION[v.lower()]
-    return "?"
+            verdict = _S_ACTION[v.lower()]
+            break
+    # A block/drop/reject verdict is the priority signal and wins outright.
+    # Otherwise a rule named for a translation is surfaced as NAT — Sophos
+    # tags a permitted DNAT/SNAT as "Allowed", so unlike UniFi (whose NAT
+    # lines carry no verdict) we key off the operator's rule-naming habit,
+    # via the same _U_NAT regex.
+    if verdict in ("Block", "Drop", "Reject"):
+        return verdict
+    if _U_NAT.search(rule):
+        return "NAT"
+    return verdict
 
 
 def parse_sophos(line):
@@ -152,7 +164,7 @@ def parse_sophos(line):
         dst_port = -1
     rule = kv.get("fw_rule_name") or (
         f"rule {kv['fw_rule_id']}" if kv.get("fw_rule_id") else "")
-    return (src, dst, proto, dst_port, _sophos_action(kv), rule)
+    return (src, dst, proto, dst_port, _sophos_action(kv, rule), rule)
 
 
 _PARSERS = {"unifi": parse_unifi, "sophos": parse_sophos}

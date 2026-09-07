@@ -22,6 +22,10 @@ retention so you also get short-term history and CSV export.
   source IP, destination IP, protocol, port, allow/block verdict, and
   rule. **Green = allowed, red = blocked/dropped/rejected, blue =
   NAT/port-forward** (a translation record, not a permit/deny verdict).
+  NAT is recognised from the rule name for both vendors — UniFi tags it in
+  the rule automatically; on Sophos just put `NAT`, `DNAT`, `SNAT`, or
+  `port-forward` in the firewall rule name. A blocked packet on a NAT rule
+  still counts as blocked (red).
 - **Zero dependencies** — pure Python 3 standard library, one container.
 - **One UDP port per device**, each labelled with a friendly name and
   vendor in a small JSON config.

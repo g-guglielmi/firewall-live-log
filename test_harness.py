@@ -261,6 +261,15 @@ def main():
     for _ in range(4):
         send(sophos_line("Dropped", "Drop-ICMP",
                          "1.2.3.4", "192.168.10.1", "ICMP"), P_SOPHOS)
+    # Sophos tags a permitted port-forward as "Allowed"; the NAT-named rule
+    # is what marks it as translation -> classified NAT (blue), not Allow.
+    for _ in range(7):
+        send(sophos_line("Allowed", "DNAT-Web",
+                         "203.0.113.9", "192.168.10.80", "TCP", 8443), P_SOPHOS)
+    # A blocked packet on a NAT rule stays blocked (red) -- the verdict wins.
+    for _ in range(2):
+        send(sophos_line("Denied", "DNAT-RDP",
+                         "203.0.113.9", "192.168.10.81", "TCP", 3390), P_SOPHOS)
     # Auto-detect port: one of each vendor.
     send(unifi_line("LAN_IN-A-2001", "auto unifi",
                     "172.16.0.2", "172.16.0.3", "UDP", 53), P_AUTO)
@@ -283,8 +292,8 @@ def main():
     print("== live api ==")
     live = get_json("/api/live?since=0&limit=2000")
     evs = live["events"]
-    # 36 UDM-Test + 25 Sophos-Test + 2 Mixed-Auto (1 unifi + 1 sophos) = 63.
-    check("events stored and returned", len(evs) == 63, str(len(evs)))
+    # 36 UDM-Test + 34 Sophos-Test + 2 Mixed-Auto (1 unifi + 1 sophos) = 72.
+    check("events stored and returned", len(evs) == 72, str(len(evs)))
     by = lambda **kw: [e for e in evs if all(e[k] == v for k, v in kw.items())]
 
     check("unifi allow parsed",
@@ -304,6 +313,10 @@ def main():
                  dst_port=-1)) == 4)
     check("sophos rule name captured",
           any(e["rule"] == "Drop-RDP" for e in evs))
+    check("sophos NAT-named Allowed -> NAT",
+          len(by(device="Sophos-Test", action="NAT", dst_port=8443)) == 7)
+    check("sophos NAT-named Denied -> Block (verdict wins)",
+          len(by(device="Sophos-Test", action="Block", dst_port=3390)) == 2)
     check("auto-detect: unifi on mixed port",
           len(by(device="Mixed-Auto", vendor="unifi")) == 1)
     check("auto-detect: sophos on mixed port",
@@ -342,15 +355,15 @@ def main():
 
     print("== filters ==")
     f = get_json("/api/live?since=0&vendor=sophos")
-    # 25 on Sophos-Test + 1 auto-detected on Mixed-Auto = 26.
+    # 34 on Sophos-Test + 1 auto-detected on Mixed-Auto = 35.
     check("vendor filter", all(e["vendor"] == "sophos" for e in f["events"])
-          and len(f["events"]) == 26, str(len(f["events"])))
+          and len(f["events"]) == 35, str(len(f["events"])))
     f = get_json("/api/live?since=0&action=blocked")
     check("blocked filter", all(e["action"] in ("Block", "Drop", "Reject")
-          for e in f["events"]) and len(f["events"]) == 18, str(len(f["events"])))
+          for e in f["events"]) and len(f["events"]) == 20, str(len(f["events"])))
     f = get_json("/api/live?since=0&action=NAT")
     check("nat filter", all(e["action"] == "NAT" for e in f["events"])
-          and len(f["events"]) == 5, str(len(f["events"])))
+          and len(f["events"]) == 12, str(len(f["events"])))
     f = get_json("/api/live?since=0&port=3389")
     check("port filter", all(e["dst_port"] == 3389 for e in f["events"])
           and len(f["events"]) == 6, str(len(f["events"])))
@@ -391,17 +404,17 @@ def main():
     f = get_json("/api/live?since=0&proto=!ICMP")
     check("proto negation (!) excludes matches",
           all(e["proto"] != "ICMP" for e in f["events"])
-          and len(f["events"]) == 56, str(len(f["events"])))
+          and len(f["events"]) == 65, str(len(f["events"])))
     # Port negation: 6 events are dst_port 3389; excluding leaves 57.
     f = get_json("/api/live?since=0&port=%213389")   # "!3389"
     check("port negation (!) excludes a port",
           all(e["dst_port"] != 3389 for e in f["events"])
-          and len(f["events"]) == 57, str(len(f["events"])))
+          and len(f["events"]) == 66, str(len(f["events"])))
     # dst negation: exclude a destination to filter out its noise.
     f = get_json("/api/live?since=0&dst=%2110.9.9.9")   # "!10.9.9.9"
     check("dst negation (!) excludes a destination",
           all("10.9.9.9" not in e["dst"] for e in f["events"])
-          and len(f["events"]) == 57, str(len(f["events"])))
+          and len(f["events"]) == 66, str(len(f["events"])))
     f = get_json("/api/live?since=0&device=UDM-Test")
     check("device filter",
           all(e["device"] == "UDM-Test" for e in f["events"])
@@ -411,7 +424,7 @@ def main():
     w = get_json("/api/events?window=86400&device=Sophos-Test&action=blocked")
     check("window query with filter",
           all(e["action"] in ("Block", "Drop", "Reject") for e in w["events"])
-          and len(w["events"]) == 10, str(len(w["events"])))
+          and len(w["events"]) == 12, str(len(w["events"])))
     w = get_json("/api/events?window=86400&device=UDM-Test&proto=%21ICMP")
     check("window query with negation",
           all(e["proto"] != "ICMP" for e in w["events"])
@@ -454,7 +467,7 @@ def main():
 
     print("== stats + per-device health + csv + unparsed ==")
     st = get_json("/api/stats")
-    check("stats parsed = 63 (lifetime)", st["parsed"] == 63, str(st["parsed"]))
+    check("stats parsed = 72 (lifetime)", st["parsed"] == 72, str(st["parsed"]))
     # Only the firewall-shaped-but-broken line is kept as unparsed; the three
     # non-firewall lines (charon/dnsmasq/plain text) are discarded.
     check("stats unparsed = 1 (firewall-shaped only)", st["unparsed"] == 1, str(st["unparsed"]))
@@ -468,7 +481,7 @@ def main():
     dmap = {d["name"]: d for d in st["devices"]}
     check("per-device totals from meta (scan-free)",
           dmap["UDM-Test"]["events"] == 36
-          and dmap["Sophos-Test"]["events"] == 25
+          and dmap["Sophos-Test"]["events"] == 34
           and dmap["Mixed-Auto"]["events"] == 2,
           str({k: v["events"] for k, v in dmap.items()}))
     check("per-device last_seen populated",
@@ -493,8 +506,9 @@ def main():
           and st["blocked_last_min"] == sum(d["blocked_last_min"] for d in st["devices"])
           and st["blocked_last_min"] < st["events_last_min"],
           str({k: v["blocked_last_min"] for k, v in dmap.items()}))
-    check("nat_last_min counts the NAT/forward events",
+    check("nat_last_min counts the NAT/forward events (both vendors)",
           dmap["UDM-Test"]["nat_last_min"] == 5
+          and dmap["Sophos-Test"]["nat_last_min"] == 7
           and st["nat_last_min"] == sum(d["nat_last_min"] for d in st["devices"])
           and st["nat_last_min"] < st["events_last_min"],
           str({k: v["nat_last_min"] for k, v in dmap.items()}))
@@ -634,10 +648,10 @@ def main():
           f"{code} {len(ev.get('events', []))}")
     code, lv, _ = api_get("/api/live?since=0&limit=2000", api_key)
     check("API key reads /api/live (200)",
-          code == 200 and len(lv.get("events", [])) == 63, str(code))
+          code == 200 and len(lv.get("events", [])) == 72, str(code))
     code, stx, _ = api_get("/api/stats", api_key)
     check("API key reads /api/stats (200)",
-          code == 200 and stx.get("parsed") == 63, str(code))
+          code == 200 and stx.get("parsed") == 72, str(code))
     code, dv, _ = api_get("/api/devices", api_key)
     check("API key reads /api/devices (200)",
           code == 200 and len(dv) == 3, str(code))
