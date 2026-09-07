@@ -375,8 +375,19 @@ and the **Clear filters (n)** button shows how many are set; the **?**
 button next to it summarises the filter syntax. In live mode a green
 **Live** badge pulses; **Pause** keeps polling but parks new events and
 counts them (*Paused · 37 new*), so **Resume** catches up without losing
-anything. On phones the Proto and Rule columns are hidden and the column
-filters sit behind a **Filters** toggle.
+anything.
+
+The live tail *follows* only while pinned to the newest row at the top.
+**Scroll up and the stream freezes** — new events are parked (not lost),
+so a row you're reading is never pulled out from under you — and the
+**Pause** button becomes **Jump to live** (return to the top and resume
+following). **Scroll to the bottom to page back through the retained
+history** right from the live view: the newest rows give way to older
+ones, batch by batch, all the way to the start of what's retained (a
+**Load older** button appears too), capped at 10,000 rows on screen —
+past that, **Download CSV** for the full history. On phones the Proto and
+Rule columns are hidden and the column filters sit behind a **Filters**
+toggle.
 
 The avatar menu has a **Theme** switch (Auto / Light / Dark; Auto follows
 the operating system). The choice is remembered per browser and also

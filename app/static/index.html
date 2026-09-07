@@ -1059,6 +1059,10 @@ function emptyHtml() {
 }
 let loading = false, windowHasMore = false, olderInFlight = false;
 let paused = false, pending = [];    // live tail paused; events buffered meanwhile
+// Live mode can also page back through the retained history. Once the user
+// scrolls past the tail we stop following and render everything loaded (like a
+// window); `liveHasOlder` tracks whether more sits before the oldest loaded row.
+let browsingOlder = false, liveHasOlder = false;
 let customFrom = 0, customTo = null;   // epoch secs; customTo null = open to now
 function toLocalInput(sec) {
   const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
@@ -1081,10 +1085,13 @@ function applyWindow(p) {
   }
 }
 function renderLog() {
-  // Live tail keeps only the newest SHOW rows in the DOM; a history window
-  // shows everything that's been loaded (bounded by WINDOW_MAX).
+  // Following the live tail keeps only the newest SHOW rows in the DOM (cheap
+  // to rebuild every 2s); a history window — or a live view the user has
+  // scrolled back through — shows everything loaded (bounded by WINDOW_MAX).
   const isLive = $("fMode").value === "live";
-  const shown = isLive ? events.slice(-SHOW).reverse() : events.slice().reverse();
+  const following = isLive && !browsingOlder;
+  const shown = following ? events.slice(-SHOW).reverse()
+                          : events.slice().reverse();
   $("meta").textContent = loading ? "querying…"
     : shown.length ? `${shown.length} shown / ${events.length} loaded` : "";
   const body = $("log").querySelector("tbody");
@@ -1130,15 +1137,20 @@ function renderLog() {
 }
 function updateLoadMore() {
   const btn = $("loadOlderBtn"), note = $("loadMoreNote");
-  if ($("fMode").value === "live") { btn.style.display = "none"; note.textContent = ""; return; }
+  const isLive = $("fMode").value === "live";
+  // In live mode the button is meaningful only once the user is browsing back
+  // (following the tail, "older" is just whatever hasn't streamed in yet).
+  if (isLive && !browsingOlder) { btn.style.display = "none"; note.textContent = ""; return; }
+  const more = isLive ? liveHasOlder : windowHasMore;
   if (events.length >= WINDOW_MAX) {           // hit the on-screen cap
     btn.style.display = "none";
     note.textContent = `Showing the most recent ${WINDOW_MAX.toLocaleString()} — `
-      + `narrow the filter or Download CSV for the full window.`;
-  } else if (windowHasMore) {                   // more older events exist
+      + `narrow the filter or Download CSV for the full history.`;
+  } else if (more) {                            // more older events exist
     btn.style.display = ""; note.textContent = "";
   } else {
-    btn.style.display = "none"; note.textContent = "";
+    btn.style.display = "none";
+    note.textContent = isLive ? "Start of the retained history." : "";
   }
 }
 // Live badge + Pause/Resume. Pausing keeps polling but parks new events in
@@ -1154,11 +1166,12 @@ function atLiveTop() { return liveScroller().scrollTop <= 4; }
 // the view is scrolled away from the top.
 function jumpToLive() {
   paused = false;
-  if (pending.length) {
-    events.push(...pending); pending = [];
-    if (events.length > KEEP) events = events.slice(-KEEP);
-  }
+  if (pending.length) { events.push(...pending); pending = []; }
+  // Returning to live releases any paged-back history and resumes the fast tail.
+  browsingOlder = false;
+  if (events.length > KEEP) events = events.slice(-KEEP);
   renderLog();
+  updateLoadMore();
   liveScroller().scrollTop = 0;
   updateLiveUi();
 }
@@ -1204,6 +1217,7 @@ async function pollLive() {
     if (res.error) throw new Error(res.error);
     if (res.cursor < cursor) { events = []; pending = []; }   // db pruned / restarted
     cursor = res.cursor;
+    if (res.events.length && !browsingOlder) liveHasOlder = true;  // history likely predates the tail
     if (res.events.length) {
       if (paused || !atLiveTop()) {           // manual pause, or scrolled up
         pending.push(...res.events);
@@ -1236,14 +1250,30 @@ async function loadWindow() {
     $("banner").style.display = "none";
   } catch (e) { loading = false; renderLog(); showError(e); }
 }
+// Scrolling to the bottom loads more history. In a window that's the next
+// older batch within the window; in live mode we first reveal the in-memory
+// buffer beyond the tail, then page all the way back through the retained DB.
+function maybeLoadOlder() {
+  if (olderInFlight || !events.length) return;
+  const isLive = $("fMode").value === "live";
+  if (isLive && !browsingOlder && events.length > SHOW) {
+    browsingOlder = true;         // reveal the buffered rows below the tail
+    renderLog(); updateLoadMore();
+    return;
+  }
+  if (isLive ? liveHasOlder : windowHasMore) loadOlder();
+}
 async function loadOlder() {
-  if (olderInFlight || !windowHasMore || $("fMode").value === "live"
-      || !events.length) return;
+  const isLive = $("fMode").value === "live";
+  if (olderInFlight || !events.length
+      || (isLive ? !liveHasOlder : !windowHasMore)) return;
   olderInFlight = true;
   const gen = fetchGen, btn = $("loadOlderBtn");
   btn.disabled = true; btn.textContent = "Loading…";
   try {
-    const p = filterQuery(); applyWindow(p);
+    const p = filterQuery();
+    if (isLive) p.set("from", "0");   // all retained history, id-paged
+    else applyWindow(p);
     p.set("limit", String(WINDOW_BATCH));
     p.set("before", String(events[0].id));   // events[0] is the oldest loaded
     const r = await fetch("/api/events?" + p); if (gone(r)) return;
@@ -1251,7 +1281,9 @@ async function loadOlder() {
     if (gen !== fetchGen) return;
     if (res.error) throw new Error(res.error);
     events = res.events.slice().reverse().concat(events);   // prepend older
-    windowHasMore = res.events.length >= WINDOW_BATCH;
+    const full = events.length >= WINDOW_MAX;
+    if (isLive) { browsingOlder = true; liveHasOlder = res.events.length >= WINDOW_BATCH && !full; }
+    else windowHasMore = res.events.length >= WINDOW_BATCH && !full;
     renderLog();
     updateLoadMore();
   } catch (e) { showError(e); }
@@ -1267,6 +1299,7 @@ function refetchSystem() {
                              // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
   windowHasMore = false;
+  browsingOlder = false; liveHasOlder = false;   // reset history paging
   paused = false; pending = [];   // a new query invalidates anything parked
   // Historical-window queries can take a moment on a big DB — show a
   // "querying…" state instead of a misleading "no events" while it runs.
@@ -1455,10 +1488,18 @@ $("fPause").addEventListener("click", () => {
 // crossing the top edge flips the button between "Pause" and "Jump to live".
 let liveWasTop = true;
 $("log").parentElement.addEventListener("scroll", () => {
-  if (view === "overview" || $("fMode").value !== "live") return;
-  const top = atLiveTop();
-  if (top && !paused && pending.length) { jumpToLive(); liveWasTop = true; return; }
-  if (top !== liveWasTop) { liveWasTop = top; updateLiveUi(); }
+  if (view === "overview") return;
+  const sc = liveScroller();
+  if ($("fMode").value === "live") {
+    const top = atLiveTop();
+    // Reaching the top resumes the live tail (flushing anything parked and
+    // releasing any paged-back history); crossing the edge flips the button.
+    if (top && !paused && (pending.length || browsingOlder)) { jumpToLive(); liveWasTop = true; return; }
+    if (top !== liveWasTop) { liveWasTop = top; updateLiveUi(); }
+  }
+  // Near the bottom? Pull in older history — the buffered rows first, then the
+  // retained database, page by page.
+  if (sc.scrollHeight - sc.scrollTop - sc.clientHeight < 240) maybeLoadOlder();
 }, { passive: true });
 // The parked-count badge is also a shortcut back to live.
 $("liveInd").addEventListener("click", () => { if (!atLiveTop()) jumpToLive(); });
