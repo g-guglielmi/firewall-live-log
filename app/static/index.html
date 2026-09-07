@@ -256,6 +256,13 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   .table-scroll { max-height:none; }
   .sysbar .sub, .sysbar .title { font-size:14px; }
   .tiles { grid-template-columns:repeat(2, 1fr); gap:8px; }
+  /* Keep the account menu in the top-right (as on desktop) instead of letting
+     it wrap to the left, where its right-anchored dropdown opened off-screen.
+     The avatar sits at the right edge of the first row; the status pill drops
+     to its own line below. */
+  header .spacer { display:none; }
+  #userbar { order:1; margin-left:auto; }
+  #fleetPill { order:2; }
 }
 
 /* user menu (avatar + dropdown) + modal (auth) */
