@@ -53,6 +53,7 @@ h2 { font-size:14px; font-weight:650; margin:22px 0 10px; }
 .sub { color:var(--muted); font-size:12.5px; }
 .sub.warn { color:var(--warning); font-weight:600; }
 .spacer { flex:1; }
+.hbreak { display:none; }   /* mobile-only flex line break (see phone media query) */
 button,.btn { font:inherit; color:var(--ink); background:var(--surface);
   border:1px solid var(--border); border-radius:8px; padding:6px 12px;
   cursor:pointer; text-decoration:none; display:inline-block; }
@@ -256,13 +257,15 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
   .table-scroll { max-height:none; }
   .sysbar .sub, .sysbar .title { font-size:14px; }
   .tiles { grid-template-columns:repeat(2, 1fr); gap:8px; }
-  /* Keep the account menu in the top-right (as on desktop) instead of letting
-     it wrap to the left, where its right-anchored dropdown opened off-screen.
-     The avatar sits at the right edge of the first row; the status pill drops
-     to its own line below. */
+  /* Keep the account menu in the top-right corner (as on desktop) instead of
+     letting it wrap to the left, where its right-anchored dropdown opened
+     off-screen. The avatar sits alone at the right of the first row; a
+     zero-height flex break drops the status pill onto its own line below, so
+     the layout is the same at any phone width. */
   header .spacer { display:none; }
   #userbar { order:1; margin-left:auto; }
-  #fleetPill { order:2; }
+  .hbreak { display:block; order:2; flex-basis:100%; height:0; }
+  #fleetPill { order:3; }
 }
 
 /* user menu (avatar + dropdown) + modal (auth) */
@@ -343,6 +346,7 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     <h1>Firewall Live Log</h1>
     <span class="sub" id="updated">loading…</span>
     <span class="spacer"></span>
+    <span class="hbreak" aria-hidden="true"></span>
     <span class="pill" id="fleetPill"><span class="dot s-nodata"></span> —</span>
     <span class="usermenu" id="userbar" style="display:none">
       <button class="avatar-btn" id="userMenuBtn" aria-haspopup="true"
