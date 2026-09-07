@@ -385,9 +385,11 @@ following). **Scroll to the bottom to page back through the retained
 history** right from the live view: the newest rows give way to older
 ones, batch by batch, all the way to the start of what's retained (a
 **Load older** button appears too), capped at 10,000 rows on screen —
-past that, **Download CSV** for the full history. On phones the Proto and
-Rule columns are hidden and the column filters sit behind a **Filters**
-toggle.
+past that, **Download CSV** for the full history. This works the same on
+phones, where the whole page scrolls: a floating **↑ Jump to live** pill
+appears while you're browsing back (the toolbar button scrolls out of
+reach there) and returns you to the tail. On phones the Proto and Rule
+columns are hidden and the column filters sit behind a **Filters** toggle.
 
 The avatar menu has a **Theme** switch (Auto / Light / Dark; Auto follows
 the operating system). The choice is remembered per browser and also

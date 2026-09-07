@@ -176,6 +176,12 @@ button:hover,.btn:hover { border-color:var(--baseline); }
 /* Scrolled up: the stream is still live but parked. Clickable to jump back. */
 .live-ind.stuck { color:var(--warning); border-color:var(--warning); cursor:pointer; }
 .live-ind.stuck .pulse { background:var(--warning); }
+/* Floating jump-to-live pill: only shown while browsing back on a page-scrolling
+   (phone) layout, where the toolbar button has scrolled out of reach. */
+#toLive { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60;
+  padding:9px 16px; border-radius:999px; border:1px solid var(--warning);
+  background:var(--surface); color:var(--warning); font-size:13px; font-weight:650;
+  box-shadow:0 3px 12px rgba(0,0,0,.35); cursor:pointer; }
 .iconbtn { width:30px; padding:6px 0; text-align:center; font-weight:650; }
 .helpwrap { position:relative; display:inline-block; }
 .help-pop { position:absolute; right:0; top:calc(100% + 8px); width:290px; z-index:40; display:none;
@@ -456,6 +462,10 @@ tbody tr.ev-nat td { background:var(--tint-nat); }
     </div>
   </div>
 </div>
+
+<!-- Floating "back to live" control for phones, where the toolbar Pause /
+     Jump-to-live button scrolls off with the page. -->
+<button id="toLive" hidden>↑ Jump to live</button>
 
 <!-- Change-password modal -->
 <div class="modal-back" id="pwModal">
@@ -1104,11 +1114,11 @@ function renderLog() {
   // scrolled down, remember the row at the top edge and its offset, then
   // restore it after the rebuild so new arrivals pile on above without
   // yanking the view. At the very top we stay pinned to live.
-  const sc = $("log").parentElement;               // .table-scroll
+  const sc = liveScroller();
   const atTop = sc.scrollTop <= 4;
   let anchorId = null, anchorOff = 0;
   if (!atTop) {
-    const scTop = sc.getBoundingClientRect().top;
+    const scTop = scRefTop(sc);
     for (const tr of body.children) {
       if (!tr.dataset.id) continue;                // skip day separators
       const r = tr.getBoundingClientRect();
@@ -1131,8 +1141,7 @@ function renderLog() {
   body.innerHTML = html;
   if (!atTop && anchorId) {
     const tr = body.querySelector(`tr[data-id="${anchorId}"]`);
-    if (tr) sc.scrollTop += (tr.getBoundingClientRect().top
-                             - sc.getBoundingClientRect().top) - anchorOff;
+    if (tr) sc.scrollTop += (tr.getBoundingClientRect().top - scRefTop(sc)) - anchorOff;
   }
 }
 function updateLoadMore() {
@@ -1159,7 +1168,18 @@ function updateLoadMore() {
 // Scroll up to read and the stream freezes — new events are parked in
 // `pending`, not rendered — so a row you're reading is never trimmed out
 // from under you at the SHOW cap. Scroll back to the top and it catches up.
-function liveScroller() { return $("log").parentElement; }   // .table-scroll
+// Which element actually scrolls the log. On desktop it's the .table-scroll
+// box (max-height:68vh, overflow:auto); on phones that cap is lifted, so the
+// whole page scrolls and document.scrollingElement is the scroller instead.
+function liveScroller() {
+  const box = $("log").parentElement;
+  return box.scrollHeight > box.clientHeight + 1 ? box : document.scrollingElement;
+}
+// Viewport-y of the scroller's client top, so row offsets are measured against
+// the same origin before and after a rebuild (0 for the page/window scroller).
+function scRefTop(sc) {
+  return sc === document.scrollingElement ? 0 : sc.getBoundingClientRect().top;
+}
 function atLiveTop() { return liveScroller().scrollTop <= 4; }
 // Return to the top and follow live: flush anything parked, clear a manual
 // pause, pin to the newest row. This is what the Pause button becomes while
@@ -1179,8 +1199,11 @@ function updateLiveUi() {
   const live = view !== "overview" && $("fMode").value === "live";
   $("liveInd").style.display = live ? "" : "none";
   $("fPause").style.display = live ? "" : "none";
-  if (!live) return;
+  if (!live) { $("toLive").hidden = true; return; }
   const scrolledUp = !atLiveTop(), parked = pending.length;
+  // On a page-scrolling (phone) layout the toolbar button scrolls out of reach,
+  // so surface a floating jump-to-live pill while browsing back.
+  $("toLive").hidden = !(scrolledUp && liveScroller() === document.scrollingElement);
   const stuck = scrolledUp && !paused && parked > 0;   // frozen while reading
   $("liveInd").className = "live-ind" + (paused ? " paused" : stuck ? " stuck" : "");
   $("liveInd").innerHTML = `<span class="pulse"></span>` + (paused
@@ -1487,11 +1510,11 @@ $("fPause").addEventListener("click", () => {
 // Track scroll: reaching the top on your own catches up and resumes following;
 // crossing the top edge flips the button between "Pause" and "Jump to live".
 let liveWasTop = true;
-$("log").parentElement.addEventListener("scroll", () => {
+function onLogScroll() {
   if (view === "overview") return;
   const sc = liveScroller();
   if ($("fMode").value === "live") {
-    const top = atLiveTop();
+    const top = sc.scrollTop <= 4;
     // Reaching the top resumes the live tail (flushing anything parked and
     // releasing any paged-back history); crossing the edge flips the button.
     if (top && !paused && (pending.length || browsingOlder)) { jumpToLive(); liveWasTop = true; return; }
@@ -1500,9 +1523,13 @@ $("log").parentElement.addEventListener("scroll", () => {
   // Near the bottom? Pull in older history — the buffered rows first, then the
   // retained database, page by page.
   if (sc.scrollHeight - sc.scrollTop - sc.clientHeight < 240) maybeLoadOlder();
-}, { passive: true });
+}
+// Listen on both: the box scrolls on desktop, the page scrolls on phones.
+$("log").parentElement.addEventListener("scroll", onLogScroll, { passive: true });
+window.addEventListener("scroll", onLogScroll, { passive: true });
 // The parked-count badge is also a shortcut back to live.
 $("liveInd").addEventListener("click", () => { if (!atLiveTop()) jumpToLive(); });
+$("toLive").addEventListener("click", jumpToLive);
 $("fClear").addEventListener("click", () => {
   ["fSrc","fDst","fProto","fPort","fRule"].forEach(id => $(id).value = ""); $("fAct").value = ""; refilter();
 });
