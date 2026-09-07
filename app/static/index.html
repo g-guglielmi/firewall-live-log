@@ -1005,7 +1005,7 @@ function rowHtml(e) {
   const cls = BLOCKED.has(e.action) ? "ev-block" : e.action === "NAT" ? "ev-nat" : "";
   const port = e.dst_port >= 0 ? `<td class="num port" data-f="port" data-v="${e.dst_port}">${e.dst_port}</td>`
                                : `<td class="num port">—</td>`;
-  return `<tr class="${cls}">
+  return `<tr class="${cls}" data-id="${e.id}">
     <td class="mono">${new Date(e.ts*1000).toLocaleTimeString()}</td>
     <td class="ip" data-f="src" data-v="${esc(e.src)}">${esc(e.src)}${flagHtml(e.src_cc)}</td>
     <td class="ip" data-f="dst" data-v="${esc(e.dst)}">${esc(e.dst)}${flagHtml(e.dst_cc)}</td>
@@ -1089,6 +1089,22 @@ function renderLog() {
     body.innerHTML = `<tr><td colspan="7" class="empty-note">${emptyHtml()}</td></tr>`;
     return;
   }
+  // Hold the reader's place. Rebuilding the tbody would otherwise reset the
+  // scroll to the top (the newest row) on every 2s poll. When the user has
+  // scrolled down, remember the row at the top edge and its offset, then
+  // restore it after the rebuild so new arrivals pile on above without
+  // yanking the view. At the very top we stay pinned to live.
+  const sc = $("log").parentElement;               // .table-scroll
+  const atTop = sc.scrollTop <= 4;
+  let anchorId = null, anchorOff = 0;
+  if (!atTop) {
+    const scTop = sc.getBoundingClientRect().top;
+    for (const tr of body.children) {
+      if (!tr.dataset.id) continue;                // skip day separators
+      const r = tr.getBoundingClientRect();
+      if (r.bottom > scTop) { anchorId = tr.dataset.id; anchorOff = r.top - scTop; break; }
+    }
+  }
   // Time-of-day alone is ambiguous once the rows span more than today, so
   // mark each day boundary with a separator row (live tail: only at midnight).
   const today = dayKey(Date.now() / 1000);
@@ -1103,6 +1119,11 @@ function renderLog() {
     html += rowHtml(e);
   }
   body.innerHTML = html;
+  if (!atTop && anchorId) {
+    const tr = body.querySelector(`tr[data-id="${anchorId}"]`);
+    if (tr) sc.scrollTop += (tr.getBoundingClientRect().top
+                             - sc.getBoundingClientRect().top) - anchorOff;
+  }
 }
 function updateLoadMore() {
   const btn = $("loadOlderBtn"), note = $("loadMoreNote");
