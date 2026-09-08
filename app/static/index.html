@@ -1087,7 +1087,9 @@ let paused = false, pending = [];    // live tail paused; events buffered meanwh
 // Live mode can also page back through the retained history. Once the user
 // scrolls past the tail we stop following and render everything loaded (like a
 // window); `liveHasOlder` tracks whether more sits before the oldest loaded row.
-let browsingOlder = false, liveHasOlder = false;
+// `olderCursor` is the server's resume point: filtered scans are chunked
+// server-side, so a page can come back empty with more history left to search.
+let browsingOlder = false, liveHasOlder = false, olderCursor = null;
 let customFrom = 0, customTo = null;   // epoch secs; customTo null = open to now
 function toLocalInput(sec) {
   const d = new Date(sec * 1000), p = n => String(n).padStart(2, "0");
@@ -1217,7 +1219,7 @@ function jumpToLive() {
   paused = false;
   if (pending.length) { events.push(...pending); pending = []; }
   // Returning to live releases any paged-back history and resumes the fast tail.
-  browsingOlder = false;
+  browsingOlder = false; olderCursor = null;
   if (events.length > KEEP) events = events.slice(-KEEP);
   renderLog();
   updateLoadMore();
@@ -1293,7 +1295,9 @@ async function loadWindow() {
     if (gen !== fetchGen) return;           // view/filters changed mid-flight
     if (res.error) throw new Error(res.error);
     events = res.events.slice().reverse();   // oldest-first
-    windowHasMore = res.events.length >= WINDOW_BATCH;
+    windowHasMore = res.has_more !== undefined ? res.has_more
+                                               : res.events.length >= WINDOW_BATCH;
+    olderCursor = res.next_before || null;
     loading = false;
     renderLog();
     updateLoadMore();
@@ -1321,20 +1325,34 @@ async function loadOlder() {
   const gen = fetchGen, btn = $("loadOlderBtn");
   btn.disabled = true; btn.textContent = "Loading…";
   try {
-    const p = filterQuery();
-    if (isLive) p.set("from", "0");   // all retained history, id-paged
-    else applyWindow(p);
-    p.set("limit", String(WINDOW_BATCH));
-    p.set("before", String(events[0].id));   // events[0] is the oldest loaded
-    const r = await fetch("/api/events?" + p); if (gone(r)) return;
-    const res = await r.json();
-    if (gen !== fetchGen) return;
-    if (res.error) throw new Error(res.error);
-    events = res.events.slice().reverse().concat(events);   // prepend older
-    const full = events.length >= WINDOW_MAX;
-    if (isLive) { browsingOlder = true; liveHasOlder = res.events.length >= WINDOW_BATCH && !full; }
-    else windowHasMore = res.events.length >= WINDOW_BATCH && !full;
-    renderLog();
+    // Filtered scans are chunked server-side (bounded id spans), so a sparse
+    // filter may need several chunks before older matches turn up. Follow the
+    // server's resume cursor for a few chunks per gesture — each request is
+    // short, so live polling stays responsive in between.
+    let added = 0;
+    for (let chunk = 0; chunk < 6; chunk++) {
+      const p = filterQuery();
+      if (isLive) p.set("from", "0");   // all retained history, id-paged
+      else applyWindow(p);
+      p.set("limit", String(WINDOW_BATCH));
+      p.set("before", String(olderCursor || events[0].id));
+      const r = await fetch("/api/events?" + p); if (gone(r)) return;
+      const res = await r.json();
+      if (gen !== fetchGen) return;
+      if (res.error) throw new Error(res.error);
+      events = res.events.slice().reverse().concat(events);   // prepend older
+      added += res.events.length;
+      olderCursor = res.next_before || null;
+      const more = (res.has_more !== undefined
+                    ? res.has_more : res.events.length >= WINDOW_BATCH)
+                   && events.length < WINDOW_MAX;
+      if (isLive) { browsingOlder = true; liveHasOlder = more; }
+      else windowHasMore = more;
+      if (added || !more) break;      // found rows, or nothing left to search
+    }
+    // Only re-render when something changed: an untouched DOM emits no scroll
+    // events, so an empty chunk can't re-trigger the scroll handler in a loop.
+    if (added) renderLog();
     updateLoadMore();
   } catch (e) { showError(e); }
   finally {
@@ -1349,8 +1367,13 @@ function refetchSystem() {
                              // only exists to stop the 2s timer stacking)
   events = []; cursor = 0;
   windowHasMore = false;
-  browsingOlder = false; liveHasOlder = false;   // reset history paging
+  browsingOlder = false; liveHasOlder = false; olderCursor = null;   // reset history paging
   paused = false; pending = [];   // a new query invalidates anything parked
+  // ...and the old scroll position: restart pinned to the top (following),
+  // otherwise the freeze logic would treat the stale offset as "scrolled up"
+  // and park the fresh results — leaving the table blank.
+  window.scrollTo(0, 0);
+  $("log").parentElement.scrollTop = 0;
   // Historical-window queries can take a moment on a big DB — show a
   // "querying…" state instead of a misleading "no events" while it runs.
   loading = ($("fMode").value !== "live");

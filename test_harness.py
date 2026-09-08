@@ -438,6 +438,15 @@ def main():
           all(e["id"] < mid for e in w2["events"])
           and len(w2["events"]) == sum(1 for i in ids if i < mid),
           str(len(w2["events"])))
+    # Paging contract: on this tiny DB every scan reaches the range start in
+    # one bounded chunk, so the response must say the history is exhausted.
+    w3 = get_json("/api/events?window=86400&device=Sophos-Test&action=blocked")
+    check("filtered window reports scan complete",
+          w3["has_more"] is False and w3.get("next_before") is None,
+          str({k: w3.get(k) for k in ("has_more", "next_before")}))
+    check("unfiltered before-page reports scan complete",
+          w2["has_more"] is False and w2.get("next_before") is None,
+          str({k: w2.get(k) for k in ("has_more", "next_before")}))
 
     print("== custom time range ==")
     now = int(time.time())
@@ -964,6 +973,25 @@ def main():
         _, res2 = storemod.query_live(rb, 0, {"device": "D", "ip": "10.1.3."}, 500)
         check("filtered match within scan cap is returned",
               len(res2) == 1 and res2[0]["src"] == "10.1.3.0", str(res2))
+        # Chunked window scan: with a 10-id span, a filter matching only the
+        # oldest row needs several resume steps — every chunk must make strict
+        # progress (next_before decreases) and terminate at the range start.
+        found, cursor, hops, progressed = [], None, 0, True
+        while hops < 10:
+            evs, more, nb = storemod.query_range(
+                rb, 0, None, {"ip": "10.1.1."}, 500, before=cursor,
+                scan_span=10)
+            found += evs
+            if not more:
+                break
+            if cursor is not None and nb >= cursor:
+                progressed = False
+                break
+            cursor, hops = nb, hops + 1
+        check("chunked filtered scan progresses, finds the match, and stops",
+              progressed and len(found) == 1 and found[0]["src"] == "10.1.1.0"
+              and 2 <= hops <= 4,
+              f"hops={hops} found={len(found)} progressed={progressed}")
     finally:
         storemod.LIVE_SCAN_CAP = saved_cap
         rb.close(); wb.close()

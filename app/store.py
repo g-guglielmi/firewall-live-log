@@ -228,11 +228,27 @@ def query_live(db, since, filters, limit):
     return cursor, _rows_to_dicts(rows)
 
 
-def query_range(db, start_ts, end_ts, filters, limit, before=None):
+# A sparse text filter can be served by no index, so one filtered page could
+# otherwise drag the id-ordered scan — and the shared reader lock every API
+# call waits on — through the whole table (minutes on a multi-GB database,
+# during which the entire app is unresponsive). Cap how many ids a single
+# request may examine; the response says whether more history remains and
+# where to resume, so the client pages through the rest chunk by chunk,
+# releasing the lock between chunks.
+WINDOW_SCAN_SPAN = 1_000_000
+
+
+def query_range(db, start_ts, end_ts, filters, limit, before=None,
+                scan_span=WINDOW_SCAN_SPAN):
     """Historical snapshot of matching events with start_ts <= ts (and, when
     end_ts is not None, ts <= end_ts), newest-first. ``before`` pages backward
     — only events with id < before, so the client can load successively older
-    batches."""
+    batches.
+
+    Returns (events, has_more, next_before): has_more says older matches may
+    still exist; pass next_before back as ``before`` to continue the scan.
+    scan_span=None disables the per-request scan cap (CSV export, which
+    cannot page and needs the complete window)."""
     clauses, args = _filter_clauses(filters)
     start_ts = int(start_ts)
     clauses.append("ts >= ?")
@@ -250,27 +266,49 @@ def query_range(db, start_ts, end_ts, filters, limit, before=None):
     # id/ts skew at the boundary; the ts filter keeps the result exact.
     row = db.execute("SELECT id FROM events WHERE ts >= ? ORDER BY ts LIMIT 1",
                      (start_ts,)).fetchone()
-    if row:
-        clauses.append("id >= ?")
-        args.append(row[0] - WINDOW_ID_MARGIN)
+    range_lo = row[0] - WINDOW_ID_MARGIN if row else 0
     # A bounded end needs a matching id ceiling: without it the DESC scan starts
     # at the newest id and drags through everything newer than the range before
     # reaching it. (An open range — end_ts None — ends at "now", so the newest
     # id is already in range and no ceiling is needed.)
+    hi = None
     if end_ts is not None:
         rowc = db.execute("SELECT id FROM events WHERE ts > ? ORDER BY ts LIMIT 1",
                           (int(end_ts),)).fetchone()
         if rowc:
+            hi = rowc[0] + WINDOW_ID_MARGIN
             clauses.append("id <= ?")
-            args.append(rowc[0] + WINDOW_ID_MARGIN)
+            args.append(hi)
+    # Bounded scan for filtered pages: examine at most scan_span ids below the
+    # scan's starting point per request.
+    floor, scanned_lo = range_lo, None
+    if scan_span and any(filters.get(k) for k in _SCANNING_FILTERS):
+        top = before if (before and before > 0) else (
+            hi + 1 if hi is not None else db.execute(
+                "SELECT COALESCE(MAX(id),0)+1 FROM events").fetchone()[0])
+        scanned_lo = max(range_lo, top - scan_span)
+        floor = scanned_lo
+    if row or scanned_lo is not None:
+        clauses.append("id >= ?")
+        args.append(floor)
     where = " WHERE " + " AND ".join(clauses)
     rows = db.execute(f"{_SELECT}{where} ORDER BY id DESC LIMIT ?",
                       args + [limit]).fetchall()
-    return _rows_to_dicts(rows)
+    # ids start at 1, so a resume point at/below max(range_lo, 1) has nothing
+    # left beneath it — without that clamp the cursor could walk into the
+    # empty margin zone (or below 0, where the before>0 guard would restart
+    # the scan from the top: an endless loop).
+    if len(rows) >= limit:                      # a full page: resume below it
+        has_more, next_before = True, rows[-1][0]
+    elif scanned_lo is not None and scanned_lo > max(range_lo, 1):
+        has_more, next_before = True, scanned_lo   # cap hit: resume below span
+    else:
+        has_more, next_before = False, None        # range start reached
+    return _rows_to_dicts(rows), has_more, next_before
 
 
 def query_window(db, window_secs, filters, limit, before=None):
     """Historical snapshot within the last window_secs (up to now), newest
     first. Thin wrapper over query_range for the fixed presets and CSV export."""
     return query_range(db, int(time.time()) - int(window_secs), None,
-                       filters, limit, before=before)
+                       filters, limit, before=before)[0]

@@ -516,10 +516,11 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
                     return
-                events = self.state.query(
+                events, has_more, next_before = self.state.query(
                     lambda db: store.query_range(db, start_ts, end_ts, filters,
                                                  limit, before=before))
-                self._json({"events": geo_mod.annotate(events)})
+                self._json({"events": geo_mod.annotate(events),
+                            "has_more": has_more, "next_before": next_before})
                 return
             if path == "/api/events.csv":
                 try:
@@ -529,9 +530,10 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
                     return
+                # CSV cannot page, so it keeps the unbounded (complete) scan.
                 events = self.state.query(
                     lambda db: store.query_range(db, start_ts, end_ts, filters,
-                                                 limit))
+                                                 limit, scan_span=None))[0]
                 self._send(200, _to_csv(events), "text/csv; charset=utf-8",
                            {"Content-Disposition": 'attachment; filename="'
                             + time.strftime("firewall-log-%Y%m%d-%H%M.csv")
