@@ -206,12 +206,45 @@ group (its first firewall). Any firewall not placed in a category shows under
 
 ## Configure the firewalls to send syslog
 
-- **UniFi (UDM / UniFi OS):** Settings → CyberSecure → Traffic Logging →
-  Flow Logging = *All Traffic* → Activity Logging (Syslog) → *SIEM
-  Server* → this host, on that device's port.
-- **Sophos Firewall (SFOS):** Configure → System services → Log settings
-  → add a Syslog server (this host + the device's port, UDP) and enable
-  *Firewall* traffic under the log selection.
+### UniFi (UDM / UniFi OS cloud gateways)
+
+In the UniFi Network application, open **Settings → CyberSecure →
+Traffic Logging** (UniFi Network 9.x — on older versions search Settings
+for *syslog* or *SIEM*), then:
+
+1. **Flow Logging** — select **All Traffic** to stream allowed *and*
+   blocked connections. *Blocked Traffic Only* also works if you only
+   care about denials; the dashboard's green Allow rows then simply stay
+   empty. The **Additional Flows** toggles (*Gateway DNS*, *UniFi
+   Services*, *All UniFi Device Management*) are optional — anything
+   that isn't a firewall event is discarded by the collector, never
+   stored.
+2. **Activity Logging (Syslog)** — select **SIEM Server**.
+3. **Contents** — keep **Triggers** and **Firewall Default Policy**
+   enabled: those carry the firewall verdict lines the dashboard parses
+   (rule hits and default-policy allows/drops). *Security Detections*,
+   *VPN*, and *Gateway* are fine to leave on too.
+4. **Server Address / Port** — the collector host, and the UDP port
+   assigned to this gateway in `devices.json` (e.g. `5514`). One
+   gateway per port — the port is how the dashboard tells devices
+   apart.
+5. Leave **NetFlow (IPFIX)**, **Debug Logs**, and **Netconsole** off:
+   NetFlow is a binary format the collector doesn't consume, and the
+   other two only add noise that would be discarded anyway.
+
+Within a few seconds the device's card on the Overview should flip to
+**receiving**. UniFi gateways forward a lot of non-firewall host syslog
+(DHCP, DNS, IPsec chatter) on the same stream — the collector filters
+that out before storage and counts it as `ignored` in `/api/stats`, so
+the extra categories cost bandwidth, not disk.
+
+### Sophos Firewall (SFOS)
+
+**Configure → System services → Log settings** → add a Syslog server
+(this host + the device's port, UDP) and enable *Firewall* traffic under
+the log selection. To have port-forwards shown as blue **NAT** events,
+put `NAT`, `DNAT`, `SNAT`, or `port-forward` in the firewall rule's
+name — the verdict still wins when a packet on such a rule is blocked.
 
 ## Environment variables
 
