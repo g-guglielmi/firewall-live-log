@@ -67,9 +67,10 @@ traffic. Filter by IP, port, protocol, action, and rule.
 
 ```sh
 # 1. Create a data directory on the host (bind mount) and a device config.
+#    Ownership is handled by the container: on start it chowns /data to its
+#    runtime user (uid 10001) and then drops root before doing anything else.
 sudo mkdir -p /srv/firewall-live-log
 sudo cp devices.example.json /srv/firewall-live-log/devices.json
-sudo chown -R 10001:10001 /srv/firewall-live-log   # container runs as uid 10001
 
 # 2. Run. --network host is recommended for a syslog collector: it needs
 #    many UDP ports and preserves each packet's real source IP.
@@ -141,12 +142,11 @@ curl -fL -o /boot/config/plugins/dockerMan/templates-user/my-firewall-live-log.x
 
 Then go to **Docker → Add Container** and pick *firewall-live-log* from
 the **Template** dropdown. Before the first start, put a `devices.json`
-in the data folder (copy [`devices.example.json`](devices.example.json))
-and make the folder writable by the container user:
-
-```sh
-chown -R 10001:10001 /mnt/user/appdata/firewall-live-log
-```
+in the data folder (copy [`devices.example.json`](devices.example.json)).
+Folder permissions take care of themselves: on start the container chowns
+its data folder to its runtime user (uid 10001, or `PUID`/`PGID`) and
+then drops root — so the usual root-owned-appdata first-run failure
+can't happen.
 
 If you run the container on a custom network (`br0` / a VLAN bridge)
 instead of `bridge`, the port mappings are ignored — the container gets
@@ -570,9 +570,13 @@ completely open.
 
 - Firewall logs are sensitive metadata about your network; protect the
   bind-mounted data directory accordingly.
-- The container runs as a non-root user (uid 10001); the bind-mounted
-  data directory must be writable by that uid (`chown 10001`), and
-  `devices.json` must be readable by it.
+- The app runs as a non-root user (uid 10001, or `PUID`/`PGID`). The
+  container starts as root only long enough for the entrypoint to chown
+  the data directories to that user — no socket is opened and no input
+  is parsed before privileges are dropped. To forbid root entirely, run
+  with `--user 10001:10001`: the fix-up is skipped and the bind-mounted
+  data directory must then be writable by that uid yourself
+  (`chown -R 10001:10001 …`).
 - That non-root user cannot bind UDP ports below 1024. Assign collection
   ports ≥ 1024 in `devices.json` (the examples use 5514+). If a firewall
   can only send to 514, remap it on the host (e.g. a `PREROUTING` DNAT to

@@ -12,7 +12,11 @@ COPY test_harness.py /app/
 RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin fll \
     && mkdir -p /data && chown fll:fll /data
 
-USER fll
+# No USER directive: the entrypoint starts as root just long enough to chown
+# the data directories to the runtime user (PUID/PGID, default 10001), then
+# drops privileges and execs the app — so a root-owned host data folder (the
+# classic Unraid appdata first-run trap) fixes itself. Run with --user to
+# skip the fix-up and enforce never-root instead.
 
 ENV DB_PATH=/data/events.db \
     DEVICES_CONFIG=/data/devices.json \
@@ -27,4 +31,4 @@ EXPOSE 8080/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('HTTP_PORT','8080')+'/healthz',timeout=4)"]
 
-CMD ["python3", "/app/main.py"]
+ENTRYPOINT ["python3", "/app/docker-entrypoint.py"]
