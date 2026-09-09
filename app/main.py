@@ -179,6 +179,26 @@ def main():
     prune_interval = int(env("PRUNE_INTERVAL_SEC", "3600"))
     queue_max = int(env("QUEUE_MAX", "100000"))
 
+    # No config yet? Seed a starter so a fresh install works out of the box
+    # instead of restart-looping until the operator writes devices.json.
+    if not os.path.exists(cfg_path):
+        try:
+            os.makedirs(os.path.dirname(cfg_path) or ".", exist_ok=True)
+            config.seed_starter(cfg_path)
+        except FileExistsError:
+            pass                       # appeared meanwhile — just load it
+        except OSError as e:
+            _die_unwritable("the device config", cfg_path, e)
+        else:
+            d = config.STARTER["devices"]
+            print(f"[config] no config found — created a starter at "
+                  f"{cfg_path}: {d[0]['name']}..{d[-1]['name']} on "
+                  f"udp/{d[0]['port']}-{d[-1]['port']}, vendor auto-detect.",
+                  file=sys.stderr)
+            print("[config] Rename the devices in that file BEFORE pointing "
+                  "syslog at a port (events are stored under the device "
+                  "name), then restart.", file=sys.stderr)
+
     try:
         cfg = config.load(cfg_path)
     except config.ConfigError as e:

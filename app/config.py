@@ -18,6 +18,26 @@ import json
 
 VALID_VENDORS = {"auto", "unifi", "sophos"}
 
+# Seeded when no config exists, so a fresh container starts working out of
+# the box. Five auto-detect devices matching the default published UDP port
+# range (5514-5518): syslog pointed at any of those ports streams
+# immediately. Users should rename the devices before sending traffic —
+# events are stored under the device name.
+STARTER = {
+    "devices": [
+        {"name": f"Firewall-{i}", "port": 5513 + i, "vendor": "auto"}
+        for i in range(1, 6)
+    ]
+}
+
+
+def seed_starter(path):
+    """Write the starter config to ``path``. Exclusive create ("x"): raises
+    FileExistsError rather than ever clobbering an existing config."""
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(STARTER, f, indent=2)
+        f.write("\n")
+
 
 class ConfigError(Exception):
     pass

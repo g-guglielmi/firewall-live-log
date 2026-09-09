@@ -1064,6 +1064,55 @@ def main():
           rc2 == 2 and "cannot open the event database" in out2
           and "Traceback" not in out2, f"rc={rc2} out={out2[-300:]}")
 
+    print("== starter config auto-seed ==")
+    # No devices.json: the app seeds Firewall-1..5 on udp/5514-5518 (vendor
+    # auto-detect) and starts, instead of restart-looping until one is made.
+    seed_dir = os.path.join(tmp, "seed")
+    os.makedirs(seed_dir)
+    seed_cfg = os.path.join(seed_dir, "devices.json")
+    e3 = dict(env, DEVICES_CONFIG=seed_cfg,
+              DB_PATH=os.path.join(seed_dir, "events.db"),
+              AUTH_ENABLED="false")
+    pr3 = subprocess.Popen([sys.executable, "-u", MAIN], env=e3,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, creationflags=creationflags)
+    out3 = []
+    threading.Thread(target=read_stdout, args=(pr3, out3), daemon=True).start()
+    up3 = False
+    deadline = time.time() + 15
+    while time.time() < deadline and pr3.poll() is None:
+        try:
+            urllib.request.urlopen(BASE + "/healthz", timeout=4).read()
+            up3 = True
+            break
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(0.3)
+    seeded = None
+    if os.path.exists(seed_cfg):
+        with open(seed_cfg) as f:
+            seeded = json.load(f)
+    check("missing devices.json is seeded and the app starts",
+          up3 and seeded is not None
+          and [d["port"] for d in seeded["devices"]] == [5514, 5515, 5516,
+                                                         5517, 5518]
+          and all(d["vendor"] == "auto" for d in seeded["devices"])
+          and any("created a starter" in l for l in out3),
+          f"up={up3} seeded={seeded} log={out3[:4]}")
+    pr3.send_signal(signal.CTRL_BREAK_EVENT if IS_WIN else signal.SIGTERM)
+    try:
+        pr3.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        pr3.kill()
+    # The seeder must never clobber an existing config.
+    import config as configmod
+    try:
+        configmod.seed_starter(cfg_path)      # the harness's real config
+        overwrote = True
+    except FileExistsError:
+        overwrote = False
+    check("seed never overwrites an existing config", overwrote is False,
+          str(overwrote))
+
     print(f"\n{checks['pass']} passed, {checks['fail']} failed. "
           f"(artifacts in {tmp})")
     sys.exit(1 if checks["fail"] else 0)

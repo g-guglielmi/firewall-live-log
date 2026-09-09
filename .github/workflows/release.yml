@@ -56,13 +56,12 @@ jobs:
       - name: Container smoke test (root-owned data dir + strict --user mode)
         run: |
           set -euo pipefail
-          # 1) Default mode: a root-owned data dir (the Unraid appdata trap)
-          #    must be fixed by the entrypoint, with the app running as 10001.
+          # 1) Spin-up-and-go: an EMPTY root-owned data dir (the Unraid
+          #    appdata default). The entrypoint must fix ownership, the app
+          #    must seed a starter devices.json and come up healthy as 10001.
           sudo mkdir -p /tmp/fll-data
-          printf '{"devices":[{"name":"T","port":5514,"vendor":"unifi"}]}' \
-            | sudo tee /tmp/fll-data/devices.json >/dev/null
           sudo chown -R root:root /tmp/fll-data
-          sudo chmod 755 /tmp/fll-data && sudo chmod 644 /tmp/fll-data/devices.json
+          sudo chmod 755 /tmp/fll-data
           docker run -d --name fll-smoke -v /tmp/fll-data:/data \
             -e AUTH_ENABLED=false -p 18080:8080 fll-smoke:test
           ok=""
@@ -78,6 +77,8 @@ jobs:
           test "$uid" = "10001"
           test "$(sudo stat -c %u /tmp/fll-data)" = "10001"
           test "$(sudo stat -c %u /tmp/fll-data/events.db)" = "10001"
+          sudo grep -q "Firewall-1" /tmp/fll-data/devices.json
+          test "$(sudo stat -c %u /tmp/fll-data/devices.json)" = "10001"
           docker rm -f fll-smoke
           # 2) Strict mode: --user skips the fix-up; an unwritable dir must
           #    fail fast with the friendly guidance, not a traceback, and the

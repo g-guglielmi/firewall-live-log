@@ -66,10 +66,13 @@ traffic. Filter by IP, port, protocol, action, and rule.
 ## Quick start
 
 ```sh
-# 1. Create a data directory on the host (bind mount) and a device config.
-#    Ownership is handled by the container: on start it chowns /data to its
-#    runtime user (uid 10001) and then drops root before doing anything else.
+# 1. Create a data directory on the host (bind mount). Ownership is handled
+#    by the container: on start it chowns /data to its runtime user
+#    (uid 10001) and then drops root before doing anything else.
 sudo mkdir -p /srv/firewall-live-log
+# Optional: pre-create your device config. Without one, a starter is seeded
+# on first boot (Firewall-1..5 on udp/5514-5518, vendor auto-detect) —
+# rename the devices before pointing syslog at them.
 sudo cp devices.example.json /srv/firewall-live-log/devices.json
 
 # 2. Run. --network host is recommended for a syslog collector: it needs
@@ -141,12 +144,15 @@ curl -fL -o /boot/config/plugins/dockerMan/templates-user/my-firewall-live-log.x
 ```
 
 Then go to **Docker → Add Container** and pick *firewall-live-log* from
-the **Template** dropdown. Before the first start, put a `devices.json`
-in the data folder (copy [`devices.example.json`](devices.example.json)).
-Folder permissions take care of themselves: on start the container chowns
-its data folder to its runtime user (uid 10001, or `PUID`/`PGID`) and
-then drops root — so the usual root-owned-appdata first-run failure
-can't happen.
+the **Template** dropdown. It starts with no preparation: folder
+permissions fix themselves (the container chowns its data folder to its
+runtime user — uid 10001, or `PUID`/`PGID` — then drops root), and on
+first boot a starter `devices.json` is seeded with five auto-detect
+devices (`Firewall-1`…`Firewall-5` on `udp/5514-5518`, matching the
+template's default port mappings). Rename the devices in
+`devices.json` **before** pointing syslog at a port — events are stored
+under the device name — then restart the container. See
+[`devices.example.json`](devices.example.json) for the format.
 
 If you run the container on a custom network (`br0` / a VLAN bridge)
 instead of `bridge`, the port mappings are ignored — the container gets
