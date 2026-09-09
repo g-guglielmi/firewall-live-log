@@ -1036,6 +1036,34 @@ def main():
     conn.close()
     check("late batch survived shutdown", n == 10, str(n))
 
+    print("== unwritable data folder diagnostics ==")
+    # A data folder the container user cannot write to (the classic first-run
+    # mistake) must die with one actionable message, not a traceback loop.
+    # Blocking trick: the DB's parent "directory" is a regular file, so both
+    # makedirs and sqlite fail with an OSError on every platform.
+    blocker = os.path.join(tmp, "blocker")
+    with open(blocker, "w") as f:
+        f.write("not a directory")
+
+    def spawn_dies_with(extra):
+        e2 = dict(env, **extra)
+        pr = subprocess.run([sys.executable, "-u", MAIN], env=e2,
+                            capture_output=True, text=True, timeout=30)
+        return pr.returncode, pr.stdout + pr.stderr
+
+    rc2, out2 = spawn_dies_with(
+        {"AUTH_DB_PATH": os.path.join(blocker, "auth.db")})
+    check("unwritable auth db dies with guidance, not a traceback",
+          rc2 == 2 and "cannot open the auth database" in out2
+          and "UID 10001" in out2 and "Traceback" not in out2,
+          f"rc={rc2} out={out2[-300:]}")
+    rc2, out2 = spawn_dies_with(
+        {"AUTH_ENABLED": "false",
+         "DB_PATH": os.path.join(blocker, "events.db")})
+    check("unwritable event db dies with guidance, not a traceback",
+          rc2 == 2 and "cannot open the event database" in out2
+          and "Traceback" not in out2, f"rc={rc2} out={out2[-300:]}")
+
     print(f"\n{checks['pass']} passed, {checks['fail']} failed. "
           f"(artifacts in {tmp})")
     sys.exit(1 if checks["fail"] else 0)

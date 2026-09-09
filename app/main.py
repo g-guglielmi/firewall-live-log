@@ -25,6 +25,7 @@ import queue
 import re
 import secrets
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -117,6 +118,18 @@ def _reset_admin(manager):
     sys.stdout.flush()
 
 
+def _die_unwritable(what, path, exc):
+    """A database the app cannot create/open is almost always the data folder
+    missing or not writable by the container user. Say so, actionably, instead
+    of crash-looping with a bare sqlite traceback."""
+    print(f"[main] cannot open {what} at {path}: {exc}", file=sys.stderr)
+    print("[main] is the data folder mounted and writable by the container "
+          "user (UID 10001)? On Unraid: chown -R 10001:10001 "
+          "/mnt/user/appdata/firewall-live-log (see the template's SETUP "
+          "notes).", file=sys.stderr)
+    sys.exit(2)
+
+
 def normalize_public_url(url):
     """Return a clean base URL (scheme + host, no trailing slash) for building
     email links, or None. Accepts a bare FQDN (assumes https)."""
@@ -140,11 +153,14 @@ def setup_auth():
         return None
 
     auth_db = env("AUTH_DB_PATH", "/data/auth.db")
-    os.makedirs(os.path.dirname(auth_db) or ".", exist_ok=True)
     ttl_hours = max(1, int(env("SESSION_TTL_HOURS", "12")))
     idle_minutes = max(0, int(env("SESSION_IDLE_MINUTES", "0")))
-    manager = auth_mod.AuthManager(auth_db, max_ttl_sec=ttl_hours * 3600,
-                                   idle_sec=idle_minutes * 60)
+    try:
+        os.makedirs(os.path.dirname(auth_db) or ".", exist_ok=True)
+        manager = auth_mod.AuthManager(auth_db, max_ttl_sec=ttl_hours * 3600,
+                                       idle_sec=idle_minutes * 60)
+    except (sqlite3.OperationalError, OSError) as e:
+        _die_unwritable("the auth database", auth_db, e)
     idle_desc = f"{idle_minutes}m idle" if idle_minutes else "no idle timeout"
     print(f"[auth] session: max {ttl_hours}h, {idle_desc}")
 
@@ -195,10 +211,13 @@ def main():
                   "DISABLED (SMTP_TLS_INSECURE) — connection is encrypted but "
                   "the server certificate is not validated", file=sys.stderr)
 
-    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     # Create the schema synchronously so the web server's read-only
     # connection can never open before the file exists.
-    store.open_writer(db_path).close()
+    try:
+        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        store.open_writer(db_path).close()
+    except (sqlite3.OperationalError, OSError) as e:
+        _die_unwritable("the event database", db_path, e)
     print(f"[main] {len(cfg.devices)} devices, retention={cfg.retention_days}d, "
           f"max_events={cfg.max_events or 'off'}, db={db_path}")
 
