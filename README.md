@@ -212,6 +212,8 @@ In the UniFi Network application, open **Settings → CyberSecure →
 Traffic Logging** (UniFi Network 9.x — on older versions search Settings
 for *syslog* or *SIEM*), then:
 
+![UniFi CyberSecure Traffic Logging: Flow Logging set to All Traffic with the Additional Flows toggles, Activity Logging (Syslog) set to SIEM Server with the Contents list, and the Server Address / Port fields highlighted](docs/unifi-syslog.png)
+
 1. **Flow Logging** — select **All Traffic** to stream allowed *and*
    blocked connections. *Blocked Traffic Only* also works if you only
    care about denials; the dashboard's green Allow rows then simply stay
