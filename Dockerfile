@@ -2,7 +2,7 @@ FROM python:3.13-slim
 
 LABEL org.opencontainers.image.source="https://github.com/g-guglielmi/firewall-live-log" \
       org.opencontainers.image.description="Multi-device (UniFi + Sophos) firewall syslog live dashboard" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-or-later"
 
 # Stdlib only — no pip install layer.
 WORKDIR /app

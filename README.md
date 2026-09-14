@@ -658,6 +658,11 @@ lazily on first use, so idle installs pay nothing.
 
 ## License
 
-[MIT](LICENSE) · bundled flag artwork from
-[flag-icons](https://github.com/lipis/flag-icons) (MIT); IP allocation data
-from the Regional Internet Registries (public).
+[GNU AGPL-3.0-or-later](LICENSE) © 2026 Gianluca Guglielmi. Because the
+dashboard is used over a network, the AGPL's section 13 applies: if you run a
+modified version and let others use it, you must offer them your modified
+source. The unmodified source is this repository.
+
+Bundled flag artwork from [flag-icons](https://github.com/lipis/flag-icons)
+(MIT); IP allocation data from the Regional Internet Registries (public). These
+third-party components keep their own licenses.
