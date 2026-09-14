@@ -658,7 +658,7 @@ lazily on first use, so idle installs pay nothing.
 
 ## License
 
-[GNU AGPL-3.0-or-later](LICENSE) © 2026 Gianluca Guglielmi. Because the
+[GNU AGPL-3.0-or-later](LICENSE) © 2026 g-guglielmi. Because the
 dashboard is used over a network, the AGPL's section 13 applies: if you run a
 modified version and let others use it, you must offer them your modified
 source. The unmodified source is this repository.
