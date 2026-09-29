@@ -33,7 +33,9 @@ EXPOSE 8080/tcp
 # Syslog collection ports are per-device (see devices.json). Publish the
 # range you use, or run with --network host (recommended for a collector).
 
+# A script rather than a -c one-liner, so the same command works verbatim
+# when pasted into a container UI that runs it via sh -c (Dockhand, Portainer).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD ["python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('HTTP_PORT','8080')+'/healthz',timeout=4)"]
+    CMD ["python3", "/app/healthcheck.py"]
 
 ENTRYPOINT ["python3", "/app/docker-entrypoint.py"]

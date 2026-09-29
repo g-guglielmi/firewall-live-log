@@ -203,6 +203,16 @@ def main():
                  for p in (db_path, os.path.join(tmp, "auth.db"))}
         check("databases are created owner-only (0600)",
               all(m == "0o600" for m in modes.values()), str(modes))
+    # The image's HEALTHCHECK script: exit 0 against the live app, 1 when
+    # nothing answers (port 1 is closed), honouring HTTP_PORT.
+    hc = os.path.join(os.path.dirname(MAIN), "healthcheck.py")
+    rc_ok = subprocess.run([sys.executable, hc], env=dict(env),
+                           capture_output=True).returncode
+    rc_bad = subprocess.run([sys.executable, hc],
+                            env=dict(env, HTTP_PORT="1"),
+                            capture_output=True, timeout=15).returncode
+    check("healthcheck.py exits 0 when the app answers, 1 when it doesn't",
+          rc_ok == 0 and rc_bad == 1, f"ok={rc_ok} bad={rc_bad}")
 
     print("== auth gate ==")
     code, _, _ = request("GET", "/api/stats")

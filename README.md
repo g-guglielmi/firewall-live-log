@@ -98,6 +98,11 @@ account and prints a generated password to the logs
 with `-e ADMIN_PASSWORD=…` on the `docker run`. See
 [Authentication](#authentication) for details.
 
+The image ships a health check that probes `/healthz` (public, no login).
+If your container UI has its own health-check command field, paste exactly
+`python3 /app/healthcheck.py` — it is a script, so it works unchanged
+whether the UI runs it directly or through `sh -c`.
+
 Pin a version for reproducible deploys:
 `ghcr.io/g-guglielmi/firewall-live-log:v0.0.1`
 (all versions under [Packages](https://github.com/g-guglielmi/firewall-live-log/pkgs/container/firewall-live-log)).

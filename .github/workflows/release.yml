@@ -89,6 +89,16 @@ jobs:
           # The seeded config must be reachable and the API alive under
           # --read-only (nothing outside /data is written at runtime).
           curl -fsS http://127.0.0.1:18080/api/devices | grep -q "Firewall-1"
+          # Docker's own HEALTHCHECK (python3 /app/healthcheck.py) must go
+          # green under these flags too.
+          hs=""
+          for i in $(seq 1 45); do
+            hs=$(docker inspect --format '{{.State.Health.Status}}' fll-smoke)
+            [ "$hs" = "healthy" ] && break
+            sleep 1
+          done
+          echo "health status: $hs"
+          test "$hs" = "healthy"
           docker rm -f fll-smoke
           # 1b) PUID=0 is refused: the entrypoint exits non-zero with the
           #     message and the app never starts.
