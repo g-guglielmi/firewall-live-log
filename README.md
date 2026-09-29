@@ -266,7 +266,8 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
-| `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie (otherwise auto-set when `X-Forwarded-Proto: https` is seen). |
+| `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie. Otherwise it is set automatically when a **trusted** proxy sends `X-Forwarded-Proto: https`. |
+| `TRUSTED_PROXIES` | _(none)_ | Comma-separated IPs/CIDRs of your reverse proxy (e.g. `172.17.0.1` or `192.168.1.10`). Only from these peers are `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` believed — for per-client lockouts, the automatic `Secure` cookie flag, and the cross-site check. From anyone else they are ignored (logged once per peer) and the real address is used. Direct access from the LAN needs nothing here. |
 | `SESSION_TTL_HOURS` | `12` | Absolute maximum session lifetime (hours). |
 | `SESSION_IDLE_MINUTES` | `0` | Idle timeout in minutes (`0` = disabled); expires a session this long after the last user activity, capped by `SESSION_TTL_HOURS`. |
 | `PUBLIC_URL` | _(none)_ | Public base URL of the dashboard (e.g. `https://firewall.example.com`); used to build password-reset links. A bare hostname is assumed `https://`. Required for self-service reset emails. |
@@ -566,9 +567,23 @@ to wipe all accounts and start over.
 
 - **Sessions** are random tokens set as an `HttpOnly`, `SameSite=Strict`
   cookie; only a hash of the token is stored server-side. The cookie gets
-  the `Secure` flag automatically when the app sees `X-Forwarded-Proto:
-  https` (i.e. behind a TLS-terminating proxy); force it with
+  the `Secure` flag automatically when a *trusted* proxy (see
+  `TRUSTED_PROXIES`) sends `X-Forwarded-Proto: https`; force it with
   `AUTH_FORCE_SECURE_COOKIE=true`.
+- **Reverse-proxy headers are only trusted from your proxy.**
+  `X-Forwarded-For` and friends are ordinary request headers anyone can
+  send, so they are honoured only when the TCP peer is listed in
+  `TRUSTED_PROXIES`; otherwise the real peer address is used and the header
+  is logged once (`ignoring X-Forwarded-For from untrusted peer …`). Behind
+  a proxy **set `TRUSTED_PROXIES` to the proxy's address**, or every user
+  shares the proxy's IP for the per-IP lockout and the `Secure` flag is not
+  set automatically. The dashboard is always reachable directly by IP as
+  well; the setting only decides whose headers are believed.
+- **Temporary passwords must be changed first.** A session whose account
+  is flagged *must change password* (the generated bootstrap admin, or a
+  user an admin created/reset with that flag) can only call `/api/me`,
+  `/api/change_password` and `/api/logout`; every other route answers `403`
+  until the password is changed.
 - **Session lifetime** is configurable:
   - `SESSION_TTL_HOURS` (default `12`) is the **absolute maximum** — a
     session is never valid longer than this, no matter how active.
@@ -600,7 +615,10 @@ to wipe all accounts and start over.
   that stall a request for 30 s and answers `503` beyond 200 concurrent
   connections.
 - **CSRF** — every state-changing request must also carry a session-bound
-  token in the `X-CSRF-Token` header.
+  token in the `X-CSRF-Token` header, and browser requests from another
+  site are refused outright (`Sec-Fetch-Site`, falling back to `Origin`
+  against `Host` / `X-Forwarded-Host` / `PUBLIC_URL`). Non-browser clients
+  such as `curl` send neither header and are unaffected.
 - All SQL is parameterised, all dynamic output is HTML-escaped, static
   files are served by fixed name only, and every response carries
   `Content-Security-Policy` (with a per-response script nonce),
@@ -621,6 +639,17 @@ completely open.
 
 - Firewall logs are sensitive metadata about your network; protect the
   bind-mounted data directory accordingly.
+- **Syslog is unauthenticated UDP**: anything that can reach a collector
+  port can write rows. Keep those ports reachable only from your firewalls
+  (host firewall rule or a management VLAN). The parser validates every
+  field at the edge — source/destination must be real IP addresses, rule
+  text is capped at 256 characters, ports at 0-65535 — and a line that
+  fails goes to the *Unparsed* counter instead of the table.
+- **CSV export** prefixes any text cell that starts with `=`, `+`, `-`,
+  `@` or a tab with an apostrophe, so a rule name crafted as a spreadsheet
+  formula is shown as text when you open the file in Excel or LibreOffice.
+  Real rule names and IPs never start with those characters, so normal
+  exports are unchanged; the JSON API returns rule text verbatim.
 - The app runs as a non-root user (uid 10001, or `PUID`/`PGID`). The
   container starts as root only long enough for the entrypoint to chown
   the data directories to that user — no socket is opened and no input

@@ -12,6 +12,7 @@ for deployments that already sit behind an authenticating reverse proxy.
 """
 
 import http.cookies
+import ipaddress
 import json
 import os
 import re
@@ -30,6 +31,71 @@ import store
 _STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "static")
 _MAX_BODY = 64 * 1024
+
+
+# --------------------------------------------------------------------------
+# Reverse-proxy trust
+# --------------------------------------------------------------------------
+# X-Forwarded-For / X-Forwarded-Proto are plain request headers: any client
+# can send them. They are believed only when the TCP peer is one of the
+# operator's configured proxies (TRUSTED_PROXIES); from anyone else they're
+# ignored and the real peer address is used. Otherwise a client reaching the
+# container directly could spoof its address to dodge the per-IP lockouts.
+
+def parse_trusted_proxies(value):
+    """Parse the TRUSTED_PROXIES setting ("ip, cidr, ...", empty or "none" =
+    trust nobody) into a tuple of ip_network objects. Raises ValueError with
+    a readable message on a bad entry."""
+    nets = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part or part.lower() == "none":
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise ValueError(f"TRUSTED_PROXIES: {part!r} is not an IP or CIDR")
+    return tuple(nets)
+
+
+def peer_is_trusted(peer, trusted):
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(addr in net for net in trusted)
+
+
+def client_ip_from(peer, xff, trusted):
+    """The effective client address for rate limiting: the TCP peer, or, when
+    the peer is a trusted proxy that sent X-Forwarded-For, the *last* entry
+    of that header — the address the proxy itself saw, which is the only part
+    of the list the client can't have written."""
+    if xff and peer_is_trusted(peer, trusted):
+        last = xff.split(",")[-1].strip()[:64]
+        if last:
+            return last
+    return peer
+
+
+_fwd_warn_lock = threading.Lock()
+_fwd_warned = {}                      # peer -> last warning time (monotonic)
+_FWD_WARN_INTERVAL = 3600
+
+
+def warn_untrusted_forward(peer, header):
+    """Log (at most hourly per peer) that a forwarded header from an
+    untrusted address was ignored — so an operator who put a proxy in front
+    without setting TRUSTED_PROXIES finds out on the first request."""
+    now = time.monotonic()
+    with _fwd_warn_lock:
+        last = _fwd_warned.get(peer)
+        if last is not None and now - last < _FWD_WARN_INTERVAL:
+            return
+        _fwd_warned[peer] = now
+    print(f"[web] ignoring {header} from untrusted peer {peer}; if that is "
+          "your reverse proxy, add it to TRUSTED_PROXIES (see README)",
+          file=sys.stderr, flush=True)
 
 
 class AppState:
@@ -276,6 +342,7 @@ class Handler(BaseHTTPRequestHandler):
     force_secure_cookie = False
     mailer = None               # mailer.Mailer, or None
     public_url = None           # e.g. https://firewall.example.com
+    trusted_proxies = ()        # ip_network tuple; see parse_trusted_proxies
 
     def log_message(self, *a):
         pass
@@ -356,11 +423,44 @@ class Handler(BaseHTTPRequestHandler):
                    {"Cache-Control": "public, max-age=604800"})
 
     # -- auth helpers ------------------------------------------------------
+    def _peer_trusted(self):
+        return peer_is_trusted(self.client_address[0], self.trusted_proxies)
+
+    def _forwarded(self, header):
+        """A forwarded header's value, but only from a trusted proxy. From
+        anyone else it is ignored (and logged once) — see the module notes."""
+        value = self.headers.get(header)
+        if not value:
+            return None
+        if not self._peer_trusted():
+            warn_untrusted_forward(self.client_address[0], header)
+            return None
+        return value
+
     def _client_ip(self):
-        xff = self.headers.get("X-Forwarded-For")
-        if xff:
-            return xff.split(",")[0].strip()[:64]
-        return self.client_address[0]
+        return client_ip_from(self.client_address[0],
+                              self._forwarded("X-Forwarded-For"),
+                              self.trusted_proxies)
+
+    def _same_origin(self):
+        """Reject state-changing requests a browser made from another site.
+        Modern browsers send Sec-Fetch-Site on every request; older ones send
+        Origin on cross-site POSTs. Non-browser clients (curl, scripts) send
+        neither and pass. This backs up the CSRF token and the SameSite
+        cookie, and is the only line of defence when AUTH_ENABLED=false."""
+        sfs = self.headers.get("Sec-Fetch-Site")
+        if sfs:
+            return sfs.lower() in ("same-origin", "none")
+        origin = self.headers.get("Origin")
+        if not origin or origin.lower() == "null":
+            return not origin                # no Origin: not a browser
+        got = urllib.parse.urlsplit(origin).netloc.lower()
+        ours = {(self.headers.get("Host") or "").lower(),
+                (self._forwarded("X-Forwarded-Host") or "").lower()}
+        if self.public_url:
+            ours.add(urllib.parse.urlsplit(self.public_url).netloc.lower())
+        ours.discard("")
+        return got in ours
 
     def _cookie_token(self):
         raw = self.headers.get("Cookie")
@@ -398,8 +498,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.auth.verify_api_key(hdr[7:].strip(), self._client_ip())
 
     def _cookie_secure(self):
-        return (self.force_secure_cookie
-                or self.headers.get("X-Forwarded-Proto", "").lower() == "https")
+        proto = self._forwarded("X-Forwarded-Proto") or ""
+        return self.force_secure_cookie or proto.lower() == "https"
 
     def _set_session_cookie(self, token, max_age):
         parts = [f"session={token}", "Path=/", "HttpOnly", "SameSite=Strict",
@@ -430,6 +530,21 @@ class Handler(BaseHTTPRequestHandler):
     def _check_csrf(self, csrf):
         got = self.headers.get("X-CSRF-Token", "")
         return bool(csrf) and secrets.compare_digest(got, csrf)
+
+    # Routes a session whose password must still be changed may use. Anything
+    # else answers 403 until the change is done, so a temporary password
+    # handed out by an admin (or the generated bootstrap one) can't be used
+    # as a permanent credential just by dismissing the dialog.
+    _MUST_CHANGE_ALLOWED = frozenset({"/", "/index.html", "/api/me",
+                                      "/api/change_password", "/api/logout",
+                                      "/api/session/touch"})
+
+    def _password_change_pending(self, user, path):
+        if user and user.get("must_change_pw") and \
+                path not in self._MUST_CHANGE_ALLOWED:
+            self._json({"error": "password change required"}, 403)
+            return True
+        return False
 
     # -- GET ---------------------------------------------------------------
     def do_GET(self):
@@ -484,6 +599,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "authentication required"}, 401)
                 else:
                     self._redirect("/login")
+                return
+            if self._password_change_pending(user, path):
                 return
 
             if path in ("/", "/index.html"):
@@ -576,6 +693,9 @@ class Handler(BaseHTTPRequestHandler):
         self._user_cache = "unset"
         path = self.path.partition("?")[0]
         try:
+            if not self._same_origin():
+                self._json({"error": "cross-site request rejected"}, 403)
+                return
             if path == "/api/login":
                 self._handle_login()
                 return
@@ -593,6 +713,8 @@ class Handler(BaseHTTPRequestHandler):
             user, csrf = authed
             if self.auth_enabled and not self._check_csrf(csrf):
                 self._json({"error": "invalid or missing CSRF token"}, 403)
+                return
+            if self._password_change_pending(user, path):
                 return
 
             if path == "/api/logout":
@@ -648,6 +770,9 @@ class Handler(BaseHTTPRequestHandler):
         self._user_cache = "unset"
         path = self.path.partition("?")[0]
         try:
+            if not self._same_origin():
+                self._json({"error": "cross-site request rejected"}, 403)
+                return
             authed = self.current_user()
             if not authed:
                 self._json({"error": "authentication required"}, 401)
@@ -655,6 +780,8 @@ class Handler(BaseHTTPRequestHandler):
             user, csrf = authed
             if self.auth_enabled and not self._check_csrf(csrf):
                 self._json({"error": "invalid or missing CSRF token"}, 403)
+                return
+            if self._password_change_pending(user, path):
                 return
             kprefix = "/api/api_keys/"
             if path.startswith(kprefix):
@@ -931,18 +1058,31 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
+_CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Neutralise spreadsheet formula injection: a text cell that starts with
+    a formula trigger gets a leading apostrophe, so Excel/LibreOffice show it
+    as text instead of evaluating it. Rule names come from syslog, i.e. from
+    whoever can send to the collector port."""
+    s = str(value)
+    return "'" + s if s and s[0] in _CSV_FORMULA_LEADS else s
+
+
 def _to_csv(events):
     import csv
     import io
     buf = io.StringIO()
-    cols = ["ts", "device", "vendor", "src", "dst", "proto", "dst_port",
-            "action", "rule"]
+    text_cols = ["device", "vendor", "src", "dst", "proto"]
     w = csv.writer(buf)
-    w.writerow(["time"] + cols[1:])
+    w.writerow(["time"] + text_cols + ["dst_port", "action", "rule"])
     for e in events:
         w.writerow([time.strftime("%Y-%m-%d %H:%M:%S",
                                   time.localtime(e["ts"]))]
-                   + [e[c] for c in cols[1:]])
+                   + [_csv_safe(e[c]) for c in text_cols]
+                   + [e["dst_port"],                 # numeric: -1 stays -1
+                      _csv_safe(e["action"]), _csv_safe(e["rule"])])
     return buf.getvalue()
 
 
@@ -991,16 +1131,22 @@ class Server(ThreadingHTTPServer):
 
 
 def serve(state, bind, port, auth_manager=None, auth_enabled=True,
-          force_secure_cookie=False, mailer=None, public_url=None):
+          force_secure_cookie=False, mailer=None, public_url=None,
+          trusted_proxies=()):
     Handler.state = state
     Handler.auth = auth_manager
     Handler.auth_enabled = auth_enabled
     Handler.force_secure_cookie = force_secure_cookie
     Handler.mailer = mailer
     Handler.public_url = public_url
+    Handler.trusted_proxies = tuple(trusted_proxies)
     httpd = Server((bind, port), Handler)
     mode = "enabled" if auth_enabled else "DISABLED"
     reset = "on" if (mailer and mailer.configured and public_url) else "off"
+    proxies = (", ".join(str(n) for n in Handler.trusted_proxies)
+               if Handler.trusted_proxies else
+               "none (X-Forwarded-* headers are ignored)")
     print(f"[web] dashboard on http://{bind}:{port} "
           f"(auth {mode}, email reset {reset})")
+    print(f"[web] trusted proxies: {proxies}", flush=True)
     return httpd

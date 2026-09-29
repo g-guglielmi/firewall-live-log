@@ -22,7 +22,41 @@ Auto-detection is reliable: the two formats use disjoint field names
 parser with no ambiguity.  Detection can always be overridden per port.
 """
 
+import ipaddress
 import re
+
+# Syslog is unauthenticated UDP: anything that can reach a collector port can
+# write rows. Every field is therefore validated/bounded here, at the edge —
+# addresses must parse as IPs and free text is capped — so hostile or
+# malformed datagrams can't plant arbitrary strings or megabytes in the
+# database. A line whose SRC/DST isn't an IP is not a firewall event: the
+# parser returns None and the collector keeps it in the "unparsed" table,
+# where the operator can see it.
+MAX_RULE_LEN = 256
+MAX_PROTO_LEN = 16
+
+
+def _ip_or_none(value):
+    """The address string if it parses as an IPv4/IPv6 address, else None.
+    The raw spelling is kept (not normalised) so stored values match what the
+    firewall logged and existing filters keep working."""
+    if not value:
+        return None
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    return value
+
+
+def _port_or_sentinel(value):
+    """0-65535 as int, else -1 (ICMP / absent / garbage)."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return -1
+    return port if 0 <= port <= 65535 else -1
+
 
 # --------------------------------------------------------------------------
 # Vendor detection
@@ -83,18 +117,16 @@ _U_NAT = re.compile(r"\b(?:d?nat|snat|masquerade|port[\s_-]?forward)\b", re.I)
 
 def parse_unifi(line):
     fields = dict(_U_FIELD.findall(line))
-    src, dst = fields.get("SRC"), fields.get("DST")
+    src, dst = _ip_or_none(fields.get("SRC")), _ip_or_none(fields.get("DST"))
     if not src or not dst:
         return None
-    proto = fields.get("PROTO", "?").upper()
-    try:
-        dst_port = int(fields["DPT"])
-    except (KeyError, ValueError):
-        dst_port = -1
+    proto = fields.get("PROTO", "?").upper()[:MAX_PROTO_LEN]
+    dst_port = _port_or_sentinel(fields.get("DPT"))
 
     m = _U_DESCR.search(line)
     rule = (m.group(1) if m and m.group(1) is not None
             else (m.group(2) if m else "")) or ""
+    rule = rule[:MAX_RULE_LEN]
 
     action = "?"
     for tag in _U_TAG.findall(line):
@@ -154,16 +186,13 @@ def parse_sophos(line):
     kv = {}
     for m in _S_KV.finditer(line):
         kv[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
-    src, dst = kv.get("src_ip"), kv.get("dst_ip")
+    src, dst = _ip_or_none(kv.get("src_ip")), _ip_or_none(kv.get("dst_ip"))
     if not src or not dst:
         return None
-    proto = (kv.get("protocol") or "?").upper()
-    try:
-        dst_port = int(kv["dst_port"])
-    except (KeyError, ValueError):
-        dst_port = -1
-    rule = kv.get("fw_rule_name") or (
-        f"rule {kv['fw_rule_id']}" if kv.get("fw_rule_id") else "")
+    proto = (kv.get("protocol") or "?").upper()[:MAX_PROTO_LEN]
+    dst_port = _port_or_sentinel(kv.get("dst_port"))
+    rule = (kv.get("fw_rule_name") or (
+        f"rule {kv['fw_rule_id']}" if kv.get("fw_rule_id") else ""))[:MAX_RULE_LEN]
     return (src, dst, proto, dst_port, _sophos_action(kv, rule), rule)
 
 

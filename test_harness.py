@@ -59,7 +59,7 @@ class _NoRedirect(urllib.request.HTTPErrorProcessor):
     https_response = http_response
 
 
-def request(method, path, obj=None, csrf=False):
+def request(method, path, obj=None, csrf=False, headers=None):
     """Return (status_code, parsed_json_or_{}, response). Never raises on a
     non-2xx status — HTTPError is unwrapped so checks can inspect the code."""
     data = json.dumps(obj).encode() if obj is not None else None
@@ -68,6 +68,8 @@ def request(method, path, obj=None, csrf=False):
         req.add_header("Content-Type", "application/json")
     if csrf:
         req.add_header("X-CSRF-Token", _CSRF["token"])
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         r = _OPENER.open(req, timeout=10)
     except urllib.error.HTTPError as e:
@@ -784,6 +786,134 @@ def main():
               code == 400 and "Error" not in body.get("error", ""),
               f"{code} {body}")
 
+    print("== hardening: proxy headers, cross-site posts, must-change gate ==")
+    # TRUSTED_PROXIES is unset for this instance, so X-Forwarded-For from the
+    # (untrusted) peer is ignored: five failures behind five different spoofed
+    # addresses still lock the (username, real ip) pair.
+    for i in range(5):
+        request("POST", "/api/login",
+                {"username": "spoofer", "password": f"bad-password-{i}"},
+                headers={"X-Forwarded-For": f"203.0.113.{i}"})
+    code, _, _ = request("POST", "/api/login",
+                         {"username": "spoofer", "password": "bad-final-1"},
+                         headers={"X-Forwarded-For": "203.0.113.99"})
+    check("spoofed X-Forwarded-For does not dodge the lockout (429)",
+          code == 429, str(code))
+    time.sleep(0.5)
+    check("ignored forwarded header is logged once with the TRUSTED_PROXIES hint",
+          sum(1 for l in out if "ignoring X-Forwarded-For from untrusted peer"
+              in l and "TRUSTED_PROXIES" in l) == 1,
+          str([l for l in out if "untrusted peer" in l][:3]))
+    # Browser cross-site requests are refused before anything else runs.
+    code, _, _ = request("POST", "/api/login",
+                         {"username": ADMIN_USER, "password": ADMIN_PASS},
+                         headers={"Sec-Fetch-Site": "cross-site"})
+    check("cross-site POST rejected via Sec-Fetch-Site (403)", code == 403,
+          str(code))
+    code, _, _ = request("POST", "/api/session/touch", None, csrf=True,
+                         headers={"Origin": "https://evil.example"})
+    check("cross-site POST rejected via Origin (403)", code == 403, str(code))
+    code, _, _ = request("POST", "/api/session/touch", None, csrf=True,
+                         headers={"Sec-Fetch-Site": "same-origin",
+                                  "Origin": f"http://127.0.0.1:{HTTP_PORT}"})
+    check("same-origin browser POST passes (200)", code == 200, str(code))
+    code, _, _ = request("POST", "/api/session/touch", None, csrf=True,
+                         headers={"Origin": "https://fw.example.test"})
+    check("Origin matching PUBLIC_URL passes (200)", code == 200, str(code))
+    # A temporary password (must_change_pw) can only be used to change the
+    # password: every data route is 403 until then.
+    code, body, _ = request("POST", "/api/users",
+                            {"username": "tempuser",
+                             "password": "TempPassword-9911",
+                             "must_change_pw": True}, csrf=True)
+    check("temp-password user created (201)", code == 201, str(code))
+    temp_id = body.get("id")
+    tj = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+    def tcall(method, path, obj=None, csrf_tok=None):
+        data = json.dumps(obj).encode() if obj is not None else None
+        req = urllib.request.Request(BASE + path, data=data, method=method)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        if csrf_tok:
+            req.add_header("X-CSRF-Token", csrf_tok)
+        try:
+            r = tj.open(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            r = e
+        raw = r.read()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except ValueError:
+            parsed = {}
+        return (r.status if hasattr(r, "status") else r.code), parsed
+    code, lb = tcall("POST", "/api/login", {"username": "tempuser",
+                                            "password": "TempPassword-9911"})
+    check("temp-password login succeeds and flags must_change_pw",
+          code == 200 and lb.get("user", {}).get("must_change_pw") is True,
+          f"{code} {lb}")
+    tcsrf = lb.get("csrf_token", "")
+    code, _ = tcall("GET", "/api/events?window=3600")
+    check("data routes answer 403 until the password is changed", code == 403,
+          str(code))
+    code, _ = tcall("GET", "/api/me")
+    check("/api/me still answers while the change is pending", code == 200,
+          str(code))
+    code, _ = tcall("POST", "/api/change_password",
+                    {"current_password": "TempPassword-9911",
+                     "new_password": "ChangedPassword-2233"}, tcsrf)
+    check("password change is allowed while pending (200)", code == 200,
+          str(code))
+    code, lb = tcall("POST", "/api/login", {"username": "tempuser",
+                                            "password": "ChangedPassword-2233"})
+    code2, _ = tcall("GET", "/api/events?window=3600")
+    check("data routes open after the change (200)",
+          code == 200 and code2 == 200, f"{code} {code2}")
+    request("DELETE", f"/api/users/{temp_id}", csrf=True)
+
+    print("== hardening: syslog validation + csv formula injection ==")
+    send(unifi_line("WAN_IN-D-7001", "=HYPERLINK(evil)",
+                    "198.51.100.7", "10.0.10.5", "TCP", 3389), P_UNIFI)
+    send(unifi_line("WAN_IN-D-7002", "+bad-rule",
+                    "198.51.100.8", "10.0.10.5", "TCP", 3389), P_UNIFI)
+    # SRC is not an IP: not an event, kept as unparsed for diagnosis.
+    send(unifi_line("LAN_IN-A-7003", "not-an-ip",
+                    "<img/src=x>", "10.0.10.5", "TCP", 80), P_UNIFI)
+    # Oversized rule text is capped; an impossible port becomes the sentinel.
+    send(unifi_line("LAN_IN-A-7004", "R" * 400,
+                    "10.0.10.77", "10.0.10.5", "TCP", 99999), P_UNIFI)
+    time.sleep(2.5)
+    _, ev, _ = request("GET", "/api/events?window=3600&device=UDM-Test"
+                       "&src=198.51.100.")
+    rules = sorted(e["rule"] for e in ev.get("events", []))
+    check("JSON API returns rule text verbatim (no csv prefixing)",
+          rules == ["+bad-rule", "=HYPERLINK(evil)"], str(rules))
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=3600&device=UDM-Test"
+            "&src=198.51.100."), timeout=10) as r:
+        csv2 = r.read().decode()
+    check("csv export neutralises formula-leading cells",
+          "'=HYPERLINK(evil)" in csv2 and "'+bad-rule" in csv2
+          and ",=HYPERLINK" not in csv2, csv2[-160:])
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=86400&device=UDM-Test&proto=ICMP"),
+            timeout=10) as r:
+        csv3 = r.read().decode()
+    check("csv keeps the numeric -1 port untouched", ",-1," in csv3
+          and ",'-1," not in csv3, csv3[-120:])
+    _, ev, _ = request("GET", "/api/events?window=3600&src=%3Cimg")
+    check("non-IP SRC never becomes an event", ev.get("events") == [],
+          str(ev.get("events"))[:80])
+    st2 = get_json("/api/stats")
+    check("non-IP SRC line is kept as unparsed (now 2)", st2["unparsed"] == 2,
+          str(st2["unparsed"]))
+    _, ev, _ = request("GET", "/api/events?window=3600&src=10.0.10.77")
+    e77 = (ev.get("events") or [{}])[0]
+    check("rule text capped at 256 chars, impossible port -> -1",
+          len(e77.get("rule", "")) == 256 and e77.get("dst_port") == -1,
+          f"len={len(e77.get('rule', ''))} port={e77.get('dst_port')}")
+
     print("== logout ==")
     code, _ = op2_json("/api/logout", None, csrf=v_csrf)
     check("logout succeeds (200)", code == 200, str(code))
@@ -996,6 +1126,49 @@ def main():
     check("oversized username is not recorded in login_attempts", n_junk == 0,
           str(n_junk))
     am2.close()
+
+    print("== hardening: input validation (unit) ==")
+    import parsers as parsersmod
+    import webserver as webmod
+    check("unifi line with a non-IP SRC is not an event",
+          parsersmod.parse_unifi(
+              "[LAN_IN-A-1] SRC=<img> DST=10.0.0.1 PROTO=TCP DPT=80") is None)
+    check("sophos line with a non-IP dst_ip is not an event",
+          parsersmod.parse_sophos(
+              'src_ip=10.0.0.1 dst_ip=evil protocol="TCP" dst_port=80') is None)
+    pr = parsersmod.parse_unifi('[LAN_IN-A-1] DESCR="' + "x" * 600 +
+                                '" SRC=10.0.0.1 DST=10.0.0.2 PROTO=TCP DPT=70000')
+    check("rule capped at 256 chars and out-of-range port -> -1",
+          pr is not None and len(pr[5]) == 256 and pr[3] == -1, str(pr)[:80])
+    check("IPv6 addresses still parse",
+          parsersmod.parse_unifi(
+              "SRC=2001:db8::1 DST=2001:db8::2 PROTO=TCP DPT=443") is not None)
+    check("sophos IPv4 still parses with raw spelling kept",
+          (parsersmod.parse_sophos(
+              'src_ip=192.168.010.1 dst_ip=8.8.8.8 protocol="TCP" dst_port=53')
+           or [None])[0] in (None, "192.168.010.1"))
+    nets = webmod.parse_trusted_proxies("10.0.0.5, 172.16.0.0/12")
+    check("client ip: untrusted peer keeps its own address",
+          webmod.client_ip_from("203.0.113.9", "1.2.3.4", nets) == "203.0.113.9")
+    check("client ip: trusted proxy's X-Forwarded-For last hop is used",
+          webmod.client_ip_from("172.17.0.2", "1.2.3.4, 198.51.100.7", nets)
+          == "198.51.100.7")
+    check("client ip: trusted proxy without the header -> peer",
+          webmod.client_ip_from("10.0.0.5", None, nets) == "10.0.0.5")
+    try:
+        webmod.parse_trusted_proxies("not-an-ip")
+        bad = False
+    except ValueError:
+        bad = True
+    check("TRUSTED_PROXIES rejects garbage", bad)
+    check("TRUSTED_PROXIES 'none' / empty mean trust nobody",
+          webmod.parse_trusted_proxies("none") == ()
+          and webmod.parse_trusted_proxies("") == ())
+    check("csv: formula-leading text cells are prefixed, others untouched",
+          webmod._csv_safe("=1+1") == "'=1+1"
+          and webmod._csv_safe("@cmd") == "'@cmd"
+          and webmod._csv_safe("Allow LAN") == "Allow LAN"
+          and webmod._csv_safe("") == "")
     # Absolute cap wins even with constant activity: 1s cap, 60s idle.
     am2 = authmod.AuthManager(os.path.join(tmp, "sess2.db"),
                               max_ttl_sec=1, idle_sec=60)

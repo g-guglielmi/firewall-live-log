@@ -12,6 +12,8 @@ Configuration:
   LAYOUT_PATH      overview grouping/order   (default <db dir>/layout.json)
   HTTP_PORT        dashboard port            (default 8080)
   HTTP_BIND        dashboard bind address    (default 0.0.0.0)
+  TRUSTED_PROXIES  reverse-proxy IPs/CIDRs whose X-Forwarded-* headers
+                   are believed (default: none)
   RETENTION_DAYS   overrides config value    (default 14)
   MAX_EVENTS       row-count safety cap, 0=off (overrides config)
   PRUNE_INTERVAL_SEC  retention sweep period (default 3600)
@@ -212,6 +214,11 @@ def main():
 
     auth_enabled = env_bool("AUTH_ENABLED", True)
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
+    try:
+        trusted_proxies = webserver.parse_trusted_proxies(env("TRUSTED_PROXIES"))
+    except ValueError as e:
+        print(f"[web] {e}", file=sys.stderr)
+        sys.exit(2)
     auth_manager = setup_auth()
     mailer = mailer_mod.from_env(env)
     public_url = normalize_public_url(env("PUBLIC_URL"))
@@ -275,7 +282,8 @@ def main():
                             auth_manager=auth_manager,
                             auth_enabled=auth_enabled,
                             force_secure_cookie=force_secure,
-                            mailer=mailer, public_url=public_url)
+                            mailer=mailer, public_url=public_url,
+                            trusted_proxies=trusted_proxies)
     threading.Thread(target=httpd.serve_forever, name="web",
                      daemon=True).start()
 

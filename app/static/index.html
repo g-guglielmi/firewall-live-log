@@ -1259,7 +1259,7 @@ function setPaused(on) {
 }
 let liveInFlight = false;
 async function pollLive() {
-  if (view === "overview" || $("fMode").value !== "live") return;
+  if (view === "overview" || $("fMode").value !== "live" || pwGate()) return;
   // Single-flight: never let the 2s timer stack a second request on top of
   // one that hasn't returned, or slow polls would pile up on the server.
   if (liveInFlight) return;
@@ -1505,6 +1505,7 @@ function showError(e) {
 }
 
 async function loadStats() {
+  if (pwGate()) return;
   try {
     const r = await fetch("/api/stats"); if (gone(r)) return;
     const s = await r.json();
@@ -2082,16 +2083,23 @@ $("logoutBtn").addEventListener("click", async () => {
   toLogin();
 });
 
-loadMe();
-loadStats();
 // Country names for flag tooltips; re-render the log once they land so flags
 // on an already-painted table appear.
 fetch("/flags/names.json").then(r => r.ok ? r.json() : {}).then(m => {
   countryNames = m; if (view !== "overview") renderLog();
 }).catch(() => {});
-fetchLayout();           // overview grouping/order (re-renders when it lands)
-setInterval(loadStats, 5000);
-restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)
+// While a password change is pending the server answers 403 to every data
+// route, so the pollers only start once /api/me says the account is clear.
+// (After the change the client signs in again and boots fresh.)
+function pwGate() { return !!(me && me.must_change_pw); }
+(async () => {
+  await loadMe();
+  if (pwGate()) return;
+  loadStats();
+  fetchLayout();           // overview grouping/order (re-renders when it lands)
+  setInterval(loadStats, 5000);
+  restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)
+})();
 </script>
 </body>
 </html>
