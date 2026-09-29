@@ -764,6 +764,26 @@ def main():
     check("admin session unaffected by another user's lockout", code == 200,
           str(code))
 
+    print("== hardening: response headers + parameter validation ==")
+    code, _, resp = request("GET", "/api/me")
+    srv = resp.headers.get("Server") or ""
+    check("Server header does not advertise the Python version",
+          "Python" not in srv, srv)
+    for hname in ("Permissions-Policy", "Cross-Origin-Opener-Policy",
+                  "Cross-Origin-Resource-Policy"):
+        check(f"{hname} header present", bool(resp.headers.get(hname)))
+    # Integers that reach SQLite must be range-checked: out of range is a 400
+    # with a message, never a 500 leaking "OverflowError: ...".
+    big = "99999999999999999999"
+    for p in (f"/api/live?since={big}", "/api/live?since=-5",
+              f"/api/events?from={big}", f"/api/events?window=3600&before={big}",
+              f"/api/events?window=3600&port=={big}",
+              "/api/events?window=3600&port=70000"):
+        code, body, _ = request("GET", p)
+        check(f"out-of-range param -> 400 ({p.partition('?')[2][:26]})",
+              code == 400 and "Error" not in body.get("error", ""),
+              f"{code} {body}")
+
     print("== logout ==")
     code, _ = op2_json("/api/logout", None, csrf=v_csrf)
     check("logout succeeds (200)", code == 200, str(code))
@@ -898,6 +918,84 @@ def main():
     check("activity (touch) extends the idle window",
           am.get_session(tok2) is not None)
     am.close()
+
+    print("== hardening: auth lock, reset pre-check, lockout tiers ==")
+    am2 = authmod.AuthManager(os.path.join(tmp, "hard.db"))
+    hu = am2.create_user("harduser", "HardPass123456")
+    htok, _, _ = am2.create_session(hu)
+    # 1. Password hashing must not hold the DB lock: a slow verify in one
+    #    thread must not delay a session lookup in another (that lookup is
+    #    what every authenticated request does).
+    real_verify = authmod.verify_password
+
+    def slow_verify(pw, stored):
+        time.sleep(0.8)
+        return real_verify(pw, stored)
+    authmod.verify_password = slow_verify
+    th = threading.Thread(target=am2.verify_login,
+                          args=("harduser", "wrong-password-1", "10.9.9.1"))
+    th.start()
+    time.sleep(0.15)
+    t0 = time.monotonic()
+    sess = am2.get_session(htok)
+    dt = time.monotonic() - t0
+    th.join()
+    authmod.verify_password = real_verify
+    check("session lookup is not blocked by a concurrent password hash",
+          sess is not None and dt < 0.4, f"{dt:.2f}s")
+    # 2. A bogus reset token is rejected *before* the new password is hashed
+    #    (no free 600k-iteration PBKDF2 for unauthenticated callers).
+    calls = {"n": 0}
+    real_hash = authmod.hash_password
+
+    def counting_hash(pw, *a, **k):
+        calls["n"] += 1
+        return real_hash(pw, *a, **k)
+    authmod.hash_password = counting_hash
+    try:
+        am2.reset_password_with_token("bogus-token", "Whatever-12345",
+                                      ip="10.9.9.2")
+    except authmod.AuthError:
+        pass
+    check("bogus reset token is rejected without hashing", calls["n"] == 0,
+          str(calls["n"]))
+    rtok = am2.create_reset_token(hu, "10.9.9.2")
+    am2.reset_password_with_token(rtok, "NewHardPass12345", ip="10.9.9.2")
+    check("valid reset token hashes exactly once", calls["n"] == 1,
+          str(calls["n"]))
+    authmod.hash_password = real_hash
+    # 3. Reset submissions are rate-limited per IP.
+    code429, retry = None, 0
+    for _ in range(authmod.RESET_ATTEMPT_MAX_PER_IP + 1):
+        try:
+            am2.reset_password_with_token("bogus", "Whatever-12345",
+                                          ip="10.9.9.3")
+        except authmod.AuthError as e:
+            code429, retry = e.code, e.retry_after
+    check("reset submissions rate-limited per IP (429 + Retry-After)",
+          code429 == 429 and retry > 0, f"{code429} retry={retry}")
+    # 4. Lockout tiers: 5 failures lock only the (username, ip) pair; the
+    #    account itself locks for everyone after 20 failures from anywhere.
+    for _ in range(5):
+        am2.verify_login("harduser", "wrong-password-1", "10.9.9.4")
+    _, _, r_a = am2.verify_login("harduser", "NewHardPass12345", "10.9.9.4")
+    check("5 failures lock the (username, ip) pair", r_a > 0, str(r_a))
+    u_b, _, r_b = am2.verify_login("harduser", "NewHardPass12345", "10.9.9.5")
+    check("the same account from another IP is not locked out",
+          u_b is not None and r_b == 0, f"user={u_b is not None} retry={r_b}")
+    for i in range(authmod.USER_LOCKOUT_THRESHOLD):      # 4 per IP, 5 IPs
+        am2.verify_login("harduser", "wrong-password-1", f"10.9.10.{i // 4}")
+    _, _, r_c = am2.verify_login("harduser", "NewHardPass12345", "10.9.11.1")
+    check("20 failures from anywhere lock the account for every IP", r_c > 0,
+          str(r_c))
+    # 5. Junk that can't be a username is never written to login_attempts.
+    am2.verify_login("A" * 5000, "x", "10.9.9.6")
+    n_junk = am2.db.execute(
+        "SELECT COUNT(*) FROM login_attempts WHERE LENGTH(username) > 64"
+    ).fetchone()[0]
+    check("oversized username is not recorded in login_attempts", n_junk == 0,
+          str(n_junk))
+    am2.close()
     # Absolute cap wins even with constant activity: 1s cap, 60s idle.
     am2 = authmod.AuthManager(os.path.join(tmp, "sess2.db"),
                               max_ttl_sec=1, idle_sec=60)

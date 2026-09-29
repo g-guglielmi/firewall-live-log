@@ -584,11 +584,21 @@ to wipe all accounts and start over.
   restarts and upgrades** — pulling a new image does not sign everyone out.
   A session is ended early by logging out, a password change/reset, an
   admin resetting the account, `ADMIN_RESET`, or the account being deleted.
-- **Brute-force lockout** — after **5 failed logins for a username within
-  15 minutes**, that username is locked until the window passes; the login
-  API returns `429` with a `Retry-After`. A more lenient per-IP backstop
-  catches username-spraying, and unknown usernames still run a full
-  password hash so response timing never reveals whether a user exists.
+- **Brute-force lockout** — three tiers over a **15-minute window**: 5
+  failed logins for a username *from one IP* lock that pair (so a stranger
+  on the LAN can't lock you out with five bad guesses), 20 failures for a
+  username from anywhere lock the account for everyone, and a per-IP
+  backstop catches username-spraying. The login API returns `429` with a
+  `Retry-After`. Unknown usernames still run a full password hash so
+  response timing never reveals whether a user exists, and hashing never
+  runs while the auth DB lock is held, so a login flood can't stall the
+  dashboard for signed-in users.
+- **Pre-auth CPU hygiene** — the reset-link endpoint checks the token
+  before hashing the new password and is rate-limited per IP; requests that
+  can't be a real login (malformed username, oversized password) are
+  rejected before any hashing or DB write. The web server drops clients
+  that stall a request for 30 s and answers `503` beyond 200 concurrent
+  connections.
 - **CSRF** — every state-changing request must also carry a session-bound
   token in the `X-CSRF-Token` header.
 - All SQL is parameterised, all dynamic output is HTML-escaped, static

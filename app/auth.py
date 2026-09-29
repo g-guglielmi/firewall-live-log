@@ -13,11 +13,14 @@ Security properties:
   * Session tokens and CSRF tokens come from ``secrets``; only the SHA-256
     of the session token is persisted, so a leaked DB does not leak live
     tokens. Verification uses constant-time comparisons.
-  * Login is rate-limited: five failed attempts for a username within a
-    15-minute window locks that username until the window slides; a more
-    lenient per-IP backstop catches username-spraying. Unknown usernames
-    still run a dummy hash so response time does not reveal whether a user
-    exists.
+  * Login is rate-limited in three tiers over a 15-minute window: five
+    failures for a (username, ip) pair lock that pair, twenty failures for a
+    username from anywhere lock the account, and a per-IP backstop catches
+    username-spraying. Unknown usernames still run a dummy hash so response
+    time does not reveal whether a user exists.
+  * Password hashing never runs while the DB lock is held and is bounded to
+    a few concurrent runs, so a pre-auth login/reset flood cannot stall the
+    session lookups that every authenticated request depends on.
 """
 
 import base64
@@ -32,18 +35,25 @@ import time
 # --- Tunables -------------------------------------------------------------
 PBKDF2_ITERATIONS = 600_000          # OWASP 2023 floor for PBKDF2-SHA256
 SESSION_TTL_SEC = 12 * 3600          # sessions expire after 12h
-LOCKOUT_THRESHOLD = 5                # failed logins per username...
+LOCKOUT_THRESHOLD = 5                # failed logins per (username, ip)...
 LOCKOUT_WINDOW_SEC = 15 * 60         # ...within this window -> locked
+USER_LOCKOUT_THRESHOLD = 20          # ...or per username across all ips
 IP_LOCKOUT_THRESHOLD = 50            # lenient per-IP anti-spray backstop
 ATTEMPT_RETENTION_SEC = 24 * 3600    # keep login attempts this long
 MIN_PASSWORD_LEN = 12
+MAX_PASSWORD_LEN = 1024
 VALID_ROLES = ("admin", "user")
+# PBKDF2 at 600k iterations costs ~0.3s of CPU. Hashing runs outside the DB
+# lock (so it never stalls session lookups) and at most this many at once, so
+# a login/reset flood saturates a few cores instead of the whole host.
+HASH_CONCURRENCY = 4
 
 # Self-service password reset (email link) tunables.
 RESET_TTL_SEC = 30 * 60              # a reset link is valid for 30 minutes
 RESET_WINDOW_SEC = 60 * 60           # rate-limit window for reset requests
 RESET_MAX_PER_USER = 5               # ...per account within the window
 RESET_MAX_PER_IP = 20                # ...per source IP within the window
+RESET_ATTEMPT_MAX_PER_IP = 20        # token submissions per IP per window
 
 # API keys (bearer tokens for programmatic, read-only access).
 API_KEY_PREFIX = "fll_"             # recognisable prefix (helps secret scanners)
@@ -72,9 +82,10 @@ class AuthError(Exception):
     ``code`` is an HTTP-ish status the web layer can surface directly.
     """
 
-    def __init__(self, message, code=400):
+    def __init__(self, message, code=400, retry_after=0):
         super().__init__(message)
         self.code = code
+        self.retry_after = retry_after      # seconds, for a 429's Retry-After
 
 
 def _b64e(b):
@@ -119,9 +130,20 @@ def _validate_password(password):
     if not isinstance(password, str) or len(password) < MIN_PASSWORD_LEN:
         raise AuthError(
             f"password must be at least {MIN_PASSWORD_LEN} characters")
-    if len(password) > 1024:
+    if len(password) > MAX_PASSWORD_LEN:
         raise AuthError("password too long")
     return password
+
+
+def _plausible_credentials(username, password):
+    """Cheap shape check run before any DB write or hashing: a value that no
+    account could ever have (wrong type, not a valid username, absurd length)
+    is rejected without being recorded, so an attacker can't bloat the
+    attempts table or burn CPU with junk. Every existing account passed
+    _validate_username at creation, so this can never reject a real user."""
+    return (isinstance(username, str) and isinstance(password, str)
+            and bool(_USERNAME_RE.match(username))
+            and len(password) <= MAX_PASSWORD_LEN)
 
 
 def _validate_key_name(name):
@@ -164,6 +186,7 @@ class AuthManager:
             else SESSION_TTL_SEC
         self.idle_sec = idle_sec if idle_sec and idle_sec > 0 else 0
         self.lock = threading.Lock()
+        self._hash_slots = threading.BoundedSemaphore(HASH_CONCURRENCY)
         self.db = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
@@ -210,6 +233,13 @@ class AuthManager:
                 ON password_resets(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_resets_ip
                 ON password_resets(request_ip, created_at);
+            CREATE TABLE IF NOT EXISTS reset_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                ts INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_reset_attempts_ip_ts
+                ON reset_attempts(ip, ts);
             CREATE TABLE IF NOT EXISTS api_keys (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 name         TEXT NOT NULL,
@@ -241,7 +271,8 @@ class AuthManager:
         email = _validate_email(email)
         if role not in VALID_ROLES:
             raise AuthError(f"role must be one of {list(VALID_ROLES)}")
-        pw_hash = hash_password(password)
+        with self._hash_slots:
+            pw_hash = hash_password(password)
         with self.lock:
             try:
                 cur = self.db.execute(
@@ -325,7 +356,8 @@ class AuthManager:
     def set_password(self, user_id, new_password, must_change_pw=False,
                      revoke_sessions=True):
         _validate_password(new_password)
-        pw_hash = hash_password(new_password)
+        with self._hash_slots:
+            pw_hash = hash_password(new_password)
         with self.lock:
             cur = self.db.execute(
                 "UPDATE users SET pw_hash = ?, must_change_pw = ? "
@@ -357,38 +389,64 @@ class AuthManager:
             self.db.commit()
 
     # -- login + rate limiting --------------------------------------------
-    def _recent_failures(self, column, value, now):
+    def _recent_failures(self, now, username=None, ip=None):
+        """(count, oldest_ts) of failed attempts in the lockout window,
+        narrowed by username and/or ip. Only fixed SQL fragments are joined;
+        the values are always bound parameters."""
+        clauses, args = ["success = 0", "ts >= ?"], [now - LOCKOUT_WINDOW_SEC]
+        if username is not None:
+            clauses.append("username = ?")
+            args.append(username)
+        if ip is not None:
+            clauses.append("ip = ?")
+            args.append(ip)
         return self.db.execute(
-            f"SELECT COUNT(*), MIN(ts) FROM login_attempts "
-            f"WHERE {column} = ? AND success = 0 AND ts >= ?",
-            (value, now - LOCKOUT_WINDOW_SEC)).fetchone()
+            "SELECT COUNT(*), MIN(ts) FROM login_attempts WHERE "
+            + " AND ".join(clauses), args).fetchone()
+
+    def _locked_until(self, username, ip, now):
+        """0, or the epoch second the caller's lockout ends. Three tiers:
+        the (username, ip) pair locks after LOCKOUT_THRESHOLD failures — so a
+        stranger on the LAN can't lock an account out with five bad guesses,
+        the account is only username-wide locked after USER_LOCKOUT_THRESHOLD
+        failures from anywhere, and a single IP spraying many usernames hits
+        IP_LOCKOUT_THRESHOLD."""
+        until = 0
+        for count, oldest, threshold in (
+                (*self._recent_failures(now, username=username, ip=ip),
+                 LOCKOUT_THRESHOLD),
+                (*self._recent_failures(now, username=username),
+                 USER_LOCKOUT_THRESHOLD),
+                (*self._recent_failures(now, ip=ip), IP_LOCKOUT_THRESHOLD)):
+            if count >= threshold and oldest:
+                until = max(until, oldest + LOCKOUT_WINDOW_SEC)
+        return until
 
     def verify_login(self, username, password, ip):
         """Return ``(user_or_None, error_or_None, retry_after)``.
 
         ``retry_after`` is >0 only when the caller is locked out. On success
         the username's failed-attempt history is cleared.
+
+        The expensive PBKDF2 check runs *outside* ``self.lock`` (bounded by
+        ``_hash_slots``), so a flood of bad logins can never stall the session
+        lookups every other request depends on; the lock is held only for the
+        short lockout check and the attempt write.
         """
         now = int(time.time())
-        if not isinstance(username, str) or not isinstance(password, str):
-            return None, "username and password are required", 0
-        # column is a fixed literal, never user input -> not injectable.
+        if not _plausible_credentials(username, password):
+            return None, "invalid username or password", 0
         with self.lock:
-            u_count, u_oldest = self._recent_failures("username", username, now)
-            i_count, i_oldest = self._recent_failures("ip", ip, now)
-            locked_until = 0
-            if u_count >= LOCKOUT_THRESHOLD and u_oldest:
-                locked_until = max(locked_until, u_oldest + LOCKOUT_WINDOW_SEC)
-            if i_count >= IP_LOCKOUT_THRESHOLD and i_oldest:
-                locked_until = max(locked_until, i_oldest + LOCKOUT_WINDOW_SEC)
+            locked_until = self._locked_until(username, ip, now)
             if locked_until:
                 return (None, "too many failed attempts; try again later",
                         max(1, locked_until - now))
-
             row = self.db.execute(
                 _USER_SELECT + " WHERE username = ? COLLATE NOCASE",
                 (username,)).fetchone()
-            user = self._row_to_user(row)
+        user = self._row_to_user(row)
+
+        with self._hash_slots:
             if user is not None:
                 ok = verify_password(password, user["_pw_hash"])
             else:
@@ -396,6 +454,7 @@ class AuthManager:
                 verify_password(password, _DUMMY_HASH)
                 ok = False
 
+        with self.lock:
             self.db.execute(
                 "INSERT INTO login_attempts (username, ip, ts, success) "
                 "VALUES (?,?,?,?)", (username, ip, now, 1 if ok else 0))
@@ -521,22 +580,51 @@ class AuthManager:
             self.db.commit()
         return token
 
-    def reset_password_with_token(self, token, new_password):
+    def _reset_token_row(self, th, now):
+        """The live (unused, unexpired) reset row for a token hash, or None."""
+        row = self.db.execute(
+            "SELECT pr.id, pr.user_id, pr.expires_at, pr.used, u.username "
+            "FROM password_resets pr JOIN users u ON u.id = pr.user_id "
+            "WHERE pr.token_hash = ?", (th,)).fetchone()
+        if not row or row[3] or row[2] < now:
+            return None
+        return row
+
+    def reset_password_with_token(self, token, new_password, ip=None):
         """Consume a valid reset token and set the new password atomically.
         Raises AuthError if the token is missing/expired/used or the password
-        fails policy. Revokes the user's sessions and clears their lockout."""
-        if not token or not isinstance(token, str):
+        fails policy. Revokes the user's sessions and clears their lockout.
+
+        This route is reachable without a session, so it is defended against
+        being used as a CPU sink: submissions are rate-limited per IP, and the
+        token is looked up (one SHA-256 + indexed read) *before* the new
+        password is hashed — a bogus token never costs a PBKDF2 run."""
+        if not token or not isinstance(token, str) or len(token) > 128:
             raise AuthError("this reset link is invalid or has expired", 400)
         _validate_password(new_password)
-        pw_hash = hash_password(new_password)     # hash before taking the lock
         th = _token_hash(token)
         now = int(time.time())
+        ip = ip or "?"
         with self.lock:
-            row = self.db.execute(
-                "SELECT pr.id, pr.user_id, pr.expires_at, pr.used, u.username "
-                "FROM password_resets pr JOIN users u ON u.id = pr.user_id "
-                "WHERE pr.token_hash = ?", (th,)).fetchone()
-            if not row or row[3] or row[2] < now:
+            n, oldest = self.db.execute(
+                "SELECT COUNT(*), MIN(ts) FROM reset_attempts "
+                "WHERE ip = ? AND ts >= ?",
+                (ip, now - RESET_WINDOW_SEC)).fetchone()
+            if n >= RESET_ATTEMPT_MAX_PER_IP:
+                raise AuthError("too many attempts; try again later", 429,
+                                retry_after=max(1, oldest + RESET_WINDOW_SEC
+                                                - now))
+            self.db.execute("INSERT INTO reset_attempts (ip, ts) VALUES (?,?)",
+                            (ip, now))
+            self.db.commit()
+            plausible = self._reset_token_row(th, now) is not None
+        if not plausible:
+            raise AuthError("this reset link is invalid or has expired", 400)
+        with self._hash_slots:
+            pw_hash = hash_password(new_password)     # only for a live token
+        with self.lock:
+            row = self._reset_token_row(th, now)      # re-check atomically
+            if not row:
                 raise AuthError("this reset link is invalid or has expired",
                                 400)
             pr_id, user_id, _exp, _used, username = row
@@ -631,6 +719,8 @@ class AuthManager:
                             (now - ATTEMPT_RETENTION_SEC,))
             self.db.execute("DELETE FROM password_resets "
                             "WHERE expires_at < ? OR used = 1", (now,))
+            self.db.execute("DELETE FROM reset_attempts WHERE ts < ?",
+                            (now - RESET_WINDOW_SEC,))
             self.db.commit()
 
     def close(self):

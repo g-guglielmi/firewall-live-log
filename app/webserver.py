@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -58,6 +59,22 @@ def _clamp(params, key, default, hi, lo=1):
     return max(lo, min(int(params.get(key, [str(default)])[0]), hi))
 
 
+_MAX_SQLITE_INT = 2**63 - 1
+
+
+def _int_param(params, key, default=0, lo=0, hi=_MAX_SQLITE_INT):
+    """Parse an int query param that is passed through to SQLite as-is (ids,
+    epoch seconds). Raises ValueError on non-integer or out-of-range input so
+    the handler answers 400 — never a 500 from SQLite's 64-bit overflow."""
+    try:
+        v = int(params.get(key, [str(default)])[0])
+    except ValueError:
+        raise ValueError(f"{key} must be an integer")
+    if not (lo <= v <= hi):
+        raise ValueError(f"{key} is out of range")
+    return v
+
+
 MAX_RANGE_SEC = 366 * 86400          # widest custom range we'll accept
 
 # Read-only data routes an API key (Authorization: Bearer) may reach. Session
@@ -74,11 +91,9 @@ def _range_from(params, default_window):
     optional) or one of the fixed ``window`` presets (seconds-ago up to now,
     end_ts None). Raises ValueError on bad input so the handler returns 400."""
     if "from" in params:
-        start = int(params.get("from", ["0"])[0])
+        start = _int_param(params, "from")
         to = params.get("to", [""])[0].strip()
-        end = int(to) if to else None
-        if start < 0 or (end is not None and end < 0):
-            raise ValueError("from/to must be non-negative epoch seconds")
+        end = _int_param(params, "to") if to else None
         if end is not None and end <= start:
             raise ValueError("'to' must be later than 'from'")
         if end is not None and end - start > MAX_RANGE_SEC:
@@ -102,6 +117,8 @@ def _filters_from(params):
         elif not p.isdigit():
             raise ValueError("port filter must be numeric (optionally ! to "
                              "exclude, = for an exact match)")
+        elif len(p) > 5 or int(p) > 65535:
+            raise ValueError("port filter must be 0-65535")
     return {"device": one("device"), "vendor": one("vendor"),
             "ip": one("ip"), "src": one("src"), "dst": one("dst"),
             "rule": one("rule"), "proto": one("proto"), "port": port,
@@ -248,6 +265,11 @@ def _stats(state):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "firewall-live-log"
+    sys_version = ""            # don't advertise the Python version
+    # Socket read/write timeout: a client that connects and then trickles its
+    # request (slow-loris) is dropped instead of holding a thread forever.
+    # Each request is one short HTTP/1.0 exchange, so real clients never hit it.
+    timeout = 30
     state = None
     auth = None                 # auth.AuthManager, or None when disabled
     auth_enabled = True
@@ -264,6 +286,10 @@ class Handler(BaseHTTPRequestHandler):
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), "
+                                  "payment=(), usb=()",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "same-origin",
         }
         if nonce is not None:
             h["Content-Security-Policy"] = (
@@ -497,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/live":
                 try:
-                    since = int(params.get("since", ["0"])[0])
+                    since = _int_param(params, "since")
                     limit = _clamp(params, "limit", 500, 2000, lo=1)
                     filters = _filters_from(params)
                 except ValueError as e:
@@ -511,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     start_ts, end_ts = _range_from(params, 3600)
                     limit = _clamp(params, "limit", 1000, 5000, lo=1)
-                    before = int(params.get("before", ["0"])[0])
+                    before = _int_param(params, "before")
                     filters = _filters_from(params)
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
@@ -605,13 +631,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
-            self._json({"error": str(e)}, e.code)
+            self._auth_error(e)
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except BrokenPipeError:
             pass
         except Exception as e:
             self._safe_500(e)
+
+    def _auth_error(self, e):
+        headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+        self._json({"error": str(e)}, e.code, headers=headers)
 
     # -- DELETE ------------------------------------------------------------
     def do_DELETE(self):
@@ -660,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"error": "not found"}, 404)
         except auth_mod.AuthError as e:
-            self._json({"error": str(e)}, e.code)
+            self._auth_error(e)
         except BrokenPipeError:
             pass
         except Exception as e:
@@ -886,12 +916,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "invalid request body"}, 400)
             return
         self.auth.reset_password_with_token(
-            body.get("token", ""), body.get("new_password", ""))
+            body.get("token", ""), body.get("new_password", ""),
+            ip=self._client_ip())
         self._json({"ok": True})
 
     def _safe_500(self, e):
+        # The detail goes to the container log; the client gets a generic
+        # body so internals (exception types, paths, SQL) are never exposed.
+        print(f"[web] 500 on {self.command} {self.path.partition('?')[0]}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
         try:
-            self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+            self._json({"error": "internal server error"}, 500)
         except Exception:
             pass
 
@@ -911,6 +946,50 @@ def _to_csv(events):
     return buf.getvalue()
 
 
+MAX_CONNECTIONS = 200       # concurrent request threads before we answer 503
+
+_BUSY_BODY = b'{"error": "server too busy"}\n'
+_BUSY_RESPONSE = (b"HTTP/1.0 503 Service Unavailable\r\n"
+                  b"Content-Type: application/json; charset=utf-8\r\n"
+                  b"Content-Length: " + str(len(_BUSY_BODY)).encode() + b"\r\n"
+                  b"Retry-After: 2\r\nConnection: close\r\n\r\n" + _BUSY_BODY)
+
+
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a ceiling on concurrent connections. The
+    stock server spawns one thread per accepted socket without limit, so a
+    connection flood exhausts threads/memory; here the excess gets an
+    immediate 503 and is closed."""
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 64
+
+    def __init__(self, *args, max_connections=MAX_CONNECTIONS, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.settimeout(2)
+                request.sendall(_BUSY_RESPONSE)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def serve(state, bind, port, auth_manager=None, auth_enabled=True,
           force_secure_cookie=False, mailer=None, public_url=None):
     Handler.state = state
@@ -919,8 +998,7 @@ def serve(state, bind, port, auth_manager=None, auth_enabled=True,
     Handler.force_secure_cookie = force_secure_cookie
     Handler.mailer = mailer
     Handler.public_url = public_url
-    httpd = ThreadingHTTPServer((bind, port), Handler)
-    httpd.daemon_threads = True
+    httpd = Server((bind, port), Handler)
     mode = "enabled" if auth_enabled else "DISABLED"
     reset = "on" if (mailer and mailer.configured and public_url) else "off"
     print(f"[web] dashboard on http://{bind}:{port} "
