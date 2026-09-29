@@ -1,6 +1,6 @@
 # Pinned by digest (multi-arch index) so a build is reproducible and a
 # compromised or moved tag can't slip in; Dependabot opens a PR to bump it.
-FROM python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
 
 LABEL org.opencontainers.image.source="https://github.com/g-guglielmi/firewall-live-log" \
       org.opencontainers.image.description="Multi-device (UniFi + Sophos) firewall syslog live dashboard" \
