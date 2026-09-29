@@ -13,7 +13,7 @@
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/unraid/firewall-live-log.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/g-guglielmi/firewall-live-log/main/docs/icon.png</Icon>
-  <ExtraParams/>
+  <ExtraParams>--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges --read-only --tmpfs /tmp</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DonateText/>

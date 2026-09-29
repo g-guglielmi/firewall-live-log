@@ -27,7 +27,10 @@ Record formats (little tooling, big clarity):
 Run:  python3 scripts/build_geo.py
 """
 
+import base64
 import gzip
+import hashlib
+import hmac
 import io
 import ipaddress
 import json
@@ -50,9 +53,41 @@ RIRS = {
     "lacnic": "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-extended-latest",
     "ripencc": "https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest",
 }
-FLAG_ICONS_TGZ = "https://registry.npmjs.org/flag-icons/-/flag-icons-7.2.3.tgz"
+# The flag artwork is served to every dashboard user, so the tarball is
+# pinned to a version AND its npm integrity hash (Subresource-Integrity
+# format, from the registry's `dist.integrity` at pin time). A registry or
+# CDN that serves different bytes fails the build instead of shipping.
+FLAG_ICONS_VERSION = "7.2.3"
+FLAG_ICONS_TGZ = ("https://registry.npmjs.org/flag-icons/-/flag-icons-"
+                  f"{FLAG_ICONS_VERSION}.tgz")
+FLAG_ICONS_INTEGRITY = ("sha512-X2gUdteNuqdNqob2KKTJTS+ZCvyWeLCtDz9Ty8uJP17Y4o82Y+"
+                        "U/Vd4JNrdwTAjagYsRznOn9DZ+E/Q52qbmqg==")
 
 _CC = re.compile(r"^[A-Za-z]{2}$")
+
+# Anything in a flag SVG that could run code or pull remote content. The
+# flags are rendered through <img> under a strict CSP, which already blocks
+# scripts — this keeps such a file out of the repo in the first place.
+# Internal references (href="#id") are fine and common in flag-icons.
+_SVG_UNSAFE = re.compile(
+    rb"<\s*(script|foreignObject|iframe|embed|object|use\s[^>]*href\s*=\s*"
+    rb"[\"'](?!#))|<!ENTITY|javascript:|\son[a-z]+\s*=|"
+    rb"\bhref\s*=\s*[\"'](?!#)|url\(\s*[\"']?(?!#)", re.I)
+
+
+def verify_integrity(data, integrity):
+    """True when ``data`` matches an SRI string like ``sha512-<base64>``."""
+    algo, _, b64 = integrity.partition("-")
+    if algo not in ("sha256", "sha384", "sha512") or not b64:
+        raise ValueError(f"unsupported integrity string: {integrity[:16]}…")
+    digest = base64.b64encode(hashlib.new(algo, data).digest()).decode("ascii")
+    return hmac.compare_digest(digest, b64.strip())
+
+
+def svg_is_safe(svg_bytes):
+    """True when the SVG has no scripts, event handlers, entities or external
+    references (see _SVG_UNSAFE)."""
+    return _SVG_UNSAFE.search(svg_bytes) is None
 
 
 def _get(url, binary=True):
@@ -131,6 +166,11 @@ def vendor_flags(used_ccs):
     """Extract 4x3 SVGs and country names for the CCs we actually have, from
     the flag-icons tarball. Returns the set of CCs that got a flag."""
     tgz = _get(FLAG_ICONS_TGZ)
+    if not verify_integrity(tgz, FLAG_ICONS_INTEGRITY):
+        raise SystemExit(f"flag-icons {FLAG_ICONS_VERSION} tarball does not "
+                         "match its pinned integrity hash — refusing to "
+                         "vendor it")
+    print("  integrity ok:", FLAG_ICONS_INTEGRITY[:24] + "…")
     os.makedirs(FLAG_DIR, exist_ok=True)
     # clear any stale flags so removals propagate
     for old in os.listdir(FLAG_DIR):
@@ -150,6 +190,10 @@ def vendor_flags(used_ccs):
             if cc not in used_ccs:
                 continue
             svg = tar.extractfile(m).read()
+            if not svg_is_safe(svg):
+                raise SystemExit(f"refusing to vendor {m.name}: it contains "
+                                 "script, event-handler, entity or external "
+                                 "references")
             with open(os.path.join(FLAG_DIR, cc.lower() + ".svg"), "wb") as f:
                 f.write(svg)
             have.add(cc)
@@ -184,7 +228,7 @@ def main():
     # of when it ran). Source + tool versions make the provenance clear.
     with open(os.path.join(GEO_DIR, "meta.json"), "w", encoding="utf-8") as f:
         json.dump({"source": "RIR delegated-extended files",
-                   "flags": "flag-icons 7.2.3 (MIT)",
+                   "flags": f"flag-icons {FLAG_ICONS_VERSION} (MIT)",
                    "ipv4_ranges": n4, "ipv6_ranges": n6,
                    "countries": len(have)}, f, indent=2)
     print("done: %d ipv4 + %d ipv6 ranges, %d flags" % (n4, n6, len(have)))

@@ -132,6 +132,18 @@ def _die_unwritable(what, path, exc):
     sys.exit(2)
 
 
+def _restrict_file(path):
+    """chmod 600 a database and its WAL/SHM sidecars: they hold password
+    hashes, session data and the firewall history. New files already get
+    that mode from the umask set in main(); this catches files created by
+    earlier versions under the default umask. Missing files are fine."""
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except OSError:
+            pass
+
+
 def normalize_public_url(url):
     """Return a clean base URL (scheme + host, no trailing slash) for building
     email links, or None. Accepts a bare FQDN (assumes https)."""
@@ -163,6 +175,7 @@ def setup_auth():
                                        idle_sec=idle_minutes * 60)
     except (sqlite3.OperationalError, OSError) as e:
         _die_unwritable("the auth database", auth_db, e)
+    _restrict_file(auth_db)
     idle_desc = f"{idle_minutes}m idle" if idle_minutes else "no idle timeout"
     print(f"[auth] session: max {ttl_hours}h, {idle_desc}")
 
@@ -174,6 +187,10 @@ def setup_auth():
 
 
 def main():
+    # Owner-only for everything we create (databases, WAL/SHM sidecars,
+    # layout): the data folder often sits on a shared host filesystem. The
+    # seeded devices.json is the one exception (see below) — operators edit it.
+    os.umask(0o077)
     cfg_path = env("DEVICES_CONFIG", "/data/devices.json")
     db_path = env("DB_PATH", "/data/events.db")
     http_port = int(env("HTTP_PORT", "8080"))
@@ -192,6 +209,10 @@ def main():
         except OSError as e:
             _die_unwritable("the device config", cfg_path, e)
         else:
+            try:
+                os.chmod(cfg_path, 0o644)     # readable: operators edit it
+            except OSError:
+                pass
             d = config.STARTER["devices"]
             print(f"[config] no config found — created a starter at "
                   f"{cfg_path}: {d[0]['name']}..{d[-1]['name']} on "
@@ -245,6 +266,7 @@ def main():
         store.open_writer(db_path).close()
     except (sqlite3.OperationalError, OSError) as e:
         _die_unwritable("the event database", db_path, e)
+    _restrict_file(db_path)
     print(f"[main] {len(cfg.devices)} devices, retention={cfg.retention_days}d, "
           f"max_events={cfg.max_events or 'off'}, db={db_path}")
 

@@ -14,8 +14,11 @@ Runs on Linux/macOS (SIGTERM) and Windows (CTRL_BREAK):
 Exit code 0 = all checks pass.  Loopback only.
 """
 
+import base64
 import email as emaillib
+import hashlib
 import http.cookiejar
+import importlib.util
 import json
 import os
 import re
@@ -194,6 +197,12 @@ def main():
     if not up:
         proc.kill()
         sys.exit(1)
+    if os.name != "nt":
+        import stat as statmod
+        modes = {os.path.basename(p): oct(statmod.S_IMODE(os.stat(p).st_mode))
+                 for p in (db_path, os.path.join(tmp, "auth.db"))}
+        check("databases are created owner-only (0600)",
+              all(m == "0o600" for m in modes.values()), str(modes))
 
     print("== auth gate ==")
     code, _, _ = request("GET", "/api/stats")
@@ -1169,6 +1178,66 @@ def main():
           and webmod._csv_safe("@cmd") == "'@cmd"
           and webmod._csv_safe("Allow LAN") == "Allow LAN"
           and webmod._csv_safe("") == "")
+
+    print("== hardening: container entrypoint + supply-chain helpers (unit) ==")
+
+    def load_module(name, *candidates):
+        for p in candidates:
+            if os.path.exists(p):
+                spec = importlib.util.spec_from_file_location(name, p)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+        return None
+    ep = load_module("fll_entrypoint",
+                     os.path.join(HERE, "app", "docker-entrypoint.py"),
+                     os.path.join(HERE, "docker-entrypoint.py"))
+    check("entrypoint: the /data tree may be chowned",
+          ep.chown_allowed("/data") and ep.chown_allowed("/data/sub/dir"))
+    denied = [p for p in ("/", "/etc", "/etc/x", "/usr/lib", "/proc", "/dev",
+                          "/app", "/tmp", "/var/lib/x", "/root")
+              if ep.chown_allowed(p)]
+    check("entrypoint: system directories are never chowned", not denied,
+          str(denied))
+    for bad, why in (({"PUID": "0"}, "root"), ({"PGID": "0"}, "root"),
+                     ({"PUID": "abc"}, "numeric")):
+        os.environ.update(bad)
+        try:
+            ep.runtime_ids()
+            refused = False
+        except SystemExit as e:
+            refused = why in str(e)
+        for k in bad:
+            os.environ.pop(k, None)
+        check(f"entrypoint refuses {bad}", refused)
+    check("entrypoint default ids are 10001:10001",
+          ep.runtime_ids() == (10001, 10001))
+    bg = load_module("build_geo", os.path.join(HERE, "scripts", "build_geo.py"))
+    if bg is not None:                      # scripts/ isn't shipped in the image
+        flags = sorted(f for f in os.listdir(bg.FLAG_DIR) if f.endswith(".svg"))
+        unsafe = []
+        for f in flags:
+            with open(os.path.join(bg.FLAG_DIR, f), "rb") as fh:
+                if not bg.svg_is_safe(fh.read()):
+                    unsafe.append(f)
+        check(f"all {len(flags)} vendored flag SVGs pass the safety scan",
+              bool(flags) and not unsafe, str(unsafe[:5]))
+        check("svg scan rejects scripts, handlers, entities, external refs",
+              not bg.svg_is_safe(b"<svg><script>x</script></svg>")
+              and not bg.svg_is_safe(b'<svg onload="x"/>')
+              and not bg.svg_is_safe(b'<svg><image href="http://evil/x"/></svg>')
+              and not bg.svg_is_safe(b'<!DOCTYPE svg [<!ENTITY x "y">]><svg/>')
+              and not bg.svg_is_safe(b'<svg><a xlink:href="javascript:1"/></svg>')
+              and bg.svg_is_safe(b'<svg><use href="#a"/><path fill="url(#g)"/>'
+                                 b'</svg>'))
+        data = b"flag-icons-tarball-bytes"
+        good = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+        check("integrity check accepts the pinned hash and rejects other bytes",
+              bg.verify_integrity(data, good)
+              and not bg.verify_integrity(data + b"x", good))
+        check("pinned flag-icons integrity is a sha512 SRI string",
+              bg.FLAG_ICONS_INTEGRITY.startswith("sha512-")
+              and len(base64.b64decode(bg.FLAG_ICONS_INTEGRITY[7:])) == 64)
     # Absolute cap wins even with constant activity: 1s cap, 60s idle.
     am2 = authmod.AuthManager(os.path.join(tmp, "sess2.db"),
                               max_ttl_sec=1, idle_sec=60)
@@ -1369,6 +1438,12 @@ def main():
           and all(d["vendor"] == "auto" for d in seeded["devices"])
           and any("created a starter" in l for l in out3),
           f"up={up3} seeded={seeded} log={out3[:4]}")
+    if os.name != "nt" and up3:
+        import stat as statmod
+        m_cfg = oct(statmod.S_IMODE(os.stat(seed_cfg).st_mode))
+        m_db = oct(statmod.S_IMODE(os.stat(e3["DB_PATH"]).st_mode))
+        check("seeded devices.json stays editable (0644), its db is 0600",
+              m_cfg == "0o644" and m_db == "0o600", f"cfg={m_cfg} db={m_db}")
     pr3.send_signal(signal.CTRL_BREAK_EVENT if IS_WIN else signal.SIGTERM)
     try:
         pr3.wait(timeout=20)

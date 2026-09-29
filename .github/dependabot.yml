@@ -1,0 +1,17 @@
+# Keeps the two things this repo pins by hash up to date via reviewable PRs:
+# the python base image digest in the Dockerfile and the commit SHAs of the
+# GitHub Actions in the workflows. CI (the test harness) runs on each PR.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"

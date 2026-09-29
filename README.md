@@ -76,9 +76,13 @@ sudo mkdir -p /srv/firewall-live-log
 sudo cp devices.example.json /srv/firewall-live-log/devices.json
 
 # 2. Run. --network host is recommended for a syslog collector: it needs
-#    many UDP ports and preserves each packet's real source IP.
+#    many UDP ports and preserves each packet's real source IP. The
+#    cap-drop/read-only flags are the recommended lock-down (see Security
+#    notes); the container needs nothing more than that.
 docker run -d --name firewall-live-log --restart unless-stopped \
   --network host \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges --read-only --tmpfs /tmp \
   -v /srv/firewall-live-log:/data \
   ghcr.io/g-guglielmi/firewall-live-log:latest
 ```
@@ -650,13 +654,32 @@ completely open.
   formula is shown as text when you open the file in Excel or LibreOffice.
   Real rule names and IPs never start with those characters, so normal
   exports are unchanged; the JSON API returns rule text verbatim.
-- The app runs as a non-root user (uid 10001, or `PUID`/`PGID`). The
-  container starts as root only long enough for the entrypoint to chown
-  the data directories to that user — no socket is opened and no input
-  is parsed before privileges are dropped. To forbid root entirely, run
-  with `--user 10001:10001`: the fix-up is skipped and the bind-mounted
-  data directory must then be writable by that uid yourself
-  (`chown -R 10001:10001 …`).
+- The app runs as a non-root user (uid 10001, or `PUID`/`PGID`; `0` is
+  refused). The container starts as root only long enough for the
+  entrypoint to chown the data directories to that user — no socket is
+  opened and no input is parsed before privileges are dropped — and that
+  fix-up is confined to `/data` and separately mounted volumes, never a
+  system directory. To forbid root entirely, run with `--user 10001:10001`:
+  the fix-up is skipped and the bind-mounted data directory must then be
+  writable by that uid yourself (`chown -R 10001:10001 …`).
+- **Run it locked down.** Nothing outside `/data` is written at runtime and
+  the root window needs only three capabilities, so the recommended flags
+  (what the Unraid template ships, and what CI's container smoke test runs)
+  are:
+
+  ```
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges --read-only --tmpfs /tmp
+  ```
+- **Files are owner-only.** The databases and their WAL/SHM sidecars are
+  created `0600` (and existing ones are tightened on start); `layout.json`
+  likewise. The seeded `devices.json` stays `0644` so you can read and edit
+  it from the host.
+- **Supply chain.** The base image is pinned by digest and every GitHub
+  Action by commit SHA (Dependabot proposes bumps); the quarterly geo
+  refresh verifies the `flag-icons` tarball against its pinned integrity
+  hash and refuses any SVG containing scripts, event handlers or external
+  references.
 - That non-root user cannot bind UDP ports below 1024. Assign collection
   ports ≥ 1024 in `devices.json` (the examples use 5514+). If a firewall
   can only send to 514, remap it on the host (e.g. a `PREROUTING` DNAT to

@@ -1,4 +1,6 @@
-FROM python:3.13-slim
+# Pinned by digest (multi-arch index) so a build is reproducible and a
+# compromised or moved tag can't slip in; Dependabot opens a PR to bump it.
+FROM python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b
 
 LABEL org.opencontainers.image.source="https://github.com/g-guglielmi/firewall-live-log" \
       org.opencontainers.image.description="Multi-device (UniFi + Sophos) firewall syslog live dashboard" \
@@ -18,11 +20,14 @@ RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin fll 
 # classic Unraid appdata first-run trap) fixes itself. Run with --user to
 # skip the fix-up and enforce never-root instead.
 
+# PYTHONDONTWRITEBYTECODE: nothing under /app is ever written at runtime, so
+# the container works with --read-only (only /data needs to be writable).
 ENV DB_PATH=/data/events.db \
     DEVICES_CONFIG=/data/devices.json \
     AUTH_DB_PATH=/data/auth.db \
     HTTP_PORT=8080 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8080/tcp
 # Syslog collection ports are per-device (see devices.json). Publish the

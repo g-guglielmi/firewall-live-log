@@ -30,23 +30,23 @@ jobs:
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
 
       - name: End-to-end test harness (release gate)
         run: python3 test_harness.py
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Build amd64 image for the container smoke test
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64
@@ -59,10 +59,14 @@ jobs:
           # 1) Spin-up-and-go: an EMPTY root-owned data dir (the Unraid
           #    appdata default). The entrypoint must fix ownership, the app
           #    must seed a starter devices.json and come up healthy as 10001.
+          # Both runs use the exact hardening flags the Unraid template ships
+          # (ExtraParams), so the capability set is proven, not assumed.
+          HARDEN="--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+            --security-opt no-new-privileges --read-only --tmpfs /tmp"
           sudo mkdir -p /tmp/fll-data
           sudo chown -R root:root /tmp/fll-data
           sudo chmod 755 /tmp/fll-data
-          docker run -d --name fll-smoke -v /tmp/fll-data:/data \
+          docker run -d --name fll-smoke $HARDEN -v /tmp/fll-data:/data \
             -e AUTH_ENABLED=false -p 18080:8080 fll-smoke:test
           ok=""
           for i in $(seq 1 30); do
@@ -79,7 +83,31 @@ jobs:
           test "$(sudo stat -c %u /tmp/fll-data/events.db)" = "10001"
           sudo grep -q "Firewall-1" /tmp/fll-data/devices.json
           test "$(sudo stat -c %u /tmp/fll-data/devices.json)" = "10001"
+          # Databases are owner-only; the seeded config stays editable.
+          test "$(sudo stat -c %a /tmp/fll-data/events.db)" = "600"
+          test "$(sudo stat -c %a /tmp/fll-data/devices.json)" = "644"
+          # The seeded config must be reachable and the API alive under
+          # --read-only (nothing outside /data is written at runtime).
+          curl -fsS http://127.0.0.1:18080/api/devices | grep -q "Firewall-1"
           docker rm -f fll-smoke
+          # 1b) PUID=0 is refused: the entrypoint exits non-zero with the
+          #     message and the app never starts.
+          rc0=0
+          docker run --name fll-root $HARDEN -v /tmp/fll-data:/data \
+            -e PUID=0 -e AUTH_ENABLED=false fll-smoke:test || rc0=$?
+          logs0=$(docker logs fll-root 2>&1)
+          echo "$logs0"
+          test "$rc0" != "0"
+          echo "$logs0" | grep -q "refusing to run the app as root"
+          docker rm -f fll-root
+          # 1c) A *_PATH pointing at a system directory is not chowned.
+          rc1=0
+          docker run --name fll-etc $HARDEN -v /tmp/fll-data:/data \
+            -e DB_PATH=/etc/events.db -e AUTH_ENABLED=false fll-smoke:test || rc1=$?
+          logs1=$(docker logs fll-etc 2>&1)
+          echo "$logs1"
+          echo "$logs1" | grep -q "not fixing ownership of /etc"
+          docker rm -f fll-etc
           # 2) Strict mode: --user skips the fix-up; an unwritable dir must
           #    fail fast with the friendly guidance, not a traceback, and the
           #    host dir must be left untouched.
@@ -89,7 +117,7 @@ jobs:
           sudo chown -R root:root /tmp/fll-strict
           sudo chmod 755 /tmp/fll-strict
           rc=0
-          docker run --name fll-strict --user 10001:10001 \
+          docker run --name fll-strict $HARDEN --user 10001:10001 \
             -v /tmp/fll-strict:/data -e AUTH_ENABLED=false fll-smoke:test || rc=$?
           logs=$(docker logs fll-strict 2>&1)
           echo "$logs"
@@ -99,13 +127,13 @@ jobs:
           test "$(sudo stat -c %u /tmp/fll-strict)" = "0"
           docker rm -f fll-strict
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
@@ -114,7 +142,7 @@ jobs:
             type=semver,pattern={{version}},value=${{ env.TAG }}
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
