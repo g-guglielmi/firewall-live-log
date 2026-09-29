@@ -560,6 +560,17 @@ def main():
         csp = ir.headers.get("Content-Security-Policy", "")
     check("index CSP uses a script nonce",
           "script-src 'nonce-" in csp and 'nonce="' in html, csp[:80])
+    check("index CSP uses a style nonce and no 'unsafe-inline'",
+          "style-src 'nonce-" in csp and "unsafe-inline" not in csp
+          and '<style nonce="' in html, csp[:120])
+    # A style nonce only holds if the pages carry no style="" attributes at
+    # all (CSP blocks them even with a nonce), so prove that for each page.
+    inline = {}
+    for page in ("/", "/login", "/forgot", "/reset"):
+        with _OPENER.open(urllib.request.Request(BASE + page), timeout=10) as pr:
+            inline[page] = len(re.findall(r'\sstyle\s*=\s*["\']', pr.read().decode()))
+    check("no inline style attributes in any served page",
+          not any(inline.values()), str(inline))
 
     print("== user management ==")
     code, body, _ = request("POST", "/api/users",

@@ -624,10 +624,14 @@ to wipe all accounts and start over.
   against `Host` / `X-Forwarded-Host` / `PUBLIC_URL`). Non-browser clients
   such as `curl` send neither header and are unaffected.
 - All SQL is parameterised, all dynamic output is HTML-escaped, static
-  files are served by fixed name only, and every response carries
-  `Content-Security-Policy` (with a per-response script nonce),
-  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
-  `Referrer-Policy: no-referrer`.
+  files are served by fixed name only, and every response carries a strict
+  `Content-Security-Policy` (`default-src 'none'`; the page's script *and*
+  stylesheet run under a per-response nonce, and the pages contain no
+  inline `style` attributes at all, so neither injected scripts nor
+  injected styles can run), plus `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+  `Permissions-Policy`, `Cross-Origin-Opener-Policy` and
+  `Cross-Origin-Resource-Policy`.
 
 For internet-facing deployments, still terminate TLS at a reverse proxy in
 front of the container — the app itself speaks plain HTTP.

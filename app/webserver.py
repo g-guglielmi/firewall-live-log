@@ -362,7 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             h["Content-Security-Policy"] = (
                 "default-src 'none'; "
                 f"script-src 'nonce-{nonce}'; "
-                "style-src 'unsafe-inline'; "
+                f"style-src 'nonce-{nonce}'; "
                 "img-src 'self' data:; connect-src 'self'; "
                 "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         else:
@@ -405,7 +405,11 @@ class Handler(BaseHTTPRequestHandler):
         with open(os.path.join(_STATIC_DIR, filename), "r",
                   encoding="utf-8") as f:
             html = f.read()
+        # Both the script and the stylesheet blocks carry the nonce; the pages
+        # contain no inline style="" attributes (the CSP forbids them), so
+        # every visual state is a class or a CSSOM write from the script.
         html = html.replace("<script>", f'<script nonce="{nonce}">')
+        html = html.replace("<style>", f'<style nonce="{nonce}">')
         html = html.replace("__CSP_NONCE__", nonce)
         self._send(200, html, "text/html; charset=utf-8", csp_nonce=nonce)
 

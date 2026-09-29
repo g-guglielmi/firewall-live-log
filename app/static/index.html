@@ -343,6 +343,20 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 .hint { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
 .hint code { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace;
   background:var(--page); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
+/* CSP: no inline style attributes anywhere in this page, so the few
+   one-off styles the markup used to carry live here as classes, and the
+   script applies dynamic values through the CSSOM. */
+[data-init-hidden] { display:none !important; }   /* beats any id/type rule until the script converts it */
+.sub-h { margin-top:18px; font-size:14px; }
+.mt10 { margin-top:10px; }
+.modal.wide { max-width:620px; }
+.modal.narrow { max-width:420px; }
+.ta-r { text-align:right; }
+.dot.act-allow { background:var(--good); }
+.dot.act-block, .dot.act-drop { background:var(--critical); }
+.dot.act-reject { background:var(--serious); }
+.dot.act-nat { background:var(--nat); }
+.dot.act-unknown { background:var(--muted); }
 </style>
 </head>
 <body>
@@ -354,7 +368,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     <span class="spacer"></span>
     <span class="hbreak" aria-hidden="true"></span>
     <span class="pill" id="fleetPill"><span class="dot s-nodata"></span> —</span>
-    <span class="usermenu" id="userbar" style="display:none">
+    <span class="usermenu" id="userbar" data-init-hidden>
       <button class="avatar-btn" id="userMenuBtn" aria-haspopup="true"
               aria-expanded="false" title="Account">
         <span class="avatar" id="avatar">?</span>
@@ -367,9 +381,9 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
           <div class="em" id="whoEmail"></div>
         </div>
         <div class="menu-sep"></div>
-        <button class="menu-item" id="usersBtn" role="menuitem" style="display:none">Manage users</button>
-        <button class="menu-item" id="keysBtn" role="menuitem" style="display:none">Manage API keys</button>
-        <button class="menu-item" id="orgBtn" role="menuitem" style="display:none">Organize systems</button>
+        <button class="menu-item" id="usersBtn" role="menuitem" data-init-hidden>Manage users</button>
+        <button class="menu-item" id="keysBtn" role="menuitem" data-init-hidden>Manage API keys</button>
+        <button class="menu-item" id="orgBtn" role="menuitem" data-init-hidden>Organize systems</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
         <div class="menu-sep"></div>
@@ -399,7 +413,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
   </div>
 
   <!-- Single-system live log (reused for whichever system is selected) -->
-  <div id="page-system" style="display:none">
+  <div id="page-system" data-init-hidden>
     <div class="sysbar">
       <div class="sys-id">
         <span class="title" id="sysTitle"></span>
@@ -411,7 +425,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
         <span class="live-ind" id="liveInd"><span class="pulse"></span>Live</span>
         <button id="fPause" title="Pause the live tail (new events are counted, not lost)">Pause</button>
         <button class="m-only" id="fFilt" aria-pressed="false">Filters</button>
-        <button id="fClear" style="display:none">Clear filters</button>
+        <button id="fClear" data-init-hidden>Clear filters</button>
         <span class="helpwrap">
           <button class="iconbtn" id="fHelp" title="Filter syntax" aria-haspopup="true" aria-expanded="false">?</button>
           <div class="help-pop" id="helpPop" role="dialog" aria-label="Filter syntax">
@@ -430,7 +444,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
         <a class="btn" id="csvLink" href="#">Download CSV</a>
       </div>
     </div>
-    <div class="rangebar" id="rangeBar" style="display:none">
+    <div class="rangebar" id="rangeBar" data-init-hidden>
       <label for="rFrom">From</label>
       <input type="datetime-local" id="rFrom">
       <label for="rTo">To</label>
@@ -477,14 +491,14 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
       <span class="sub" id="meta"></span>
       <span class="spacer"></span>
       <span class="sub" id="loadMoreNote"></span>
-      <button id="loadOlderBtn" style="display:none">Load older</button>
+      <button id="loadOlderBtn" data-init-hidden>Load older</button>
     </div>
   </div>
 </div>
 
 <!-- Floating "back to live" control for phones, where the toolbar Pause /
      Jump-to-live button scrolls off with the page. -->
-<button id="toLive" style="display:none">↑ Jump to live</button>
+<button id="toLive" data-init-hidden>↑ Jump to live</button>
 
 <!-- Change-password modal -->
 <div class="modal-back" id="pwModal">
@@ -511,7 +525,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     <h3 id="usersTitle">Users</h3>
     <div class="sub">Create and remove dashboard accounts.</div>
     <table class="utable"><tbody id="userRows"></tbody></table>
-    <h3 style="margin-top:18px;font-size:14px">Add a user</h3>
+    <h3 class="sub-h">Add a user</h3>
     <div class="row2">
       <div>
         <label for="nuName">Username</label>
@@ -550,11 +564,11 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
       <code id="keyValue"></code>
       <span class="warn">This is the only time the full key is shown. Store it
         somewhere safe; if you lose it, revoke it and create a new one.</span>
-      <div class="actions" style="margin-top:10px">
+      <div class="actions mt10">
         <button id="keyCopy">Copy</button>
       </div>
     </div>
-    <h3 style="margin-top:18px;font-size:14px">Create a key</h3>
+    <h3 class="sub-h">Create a key</h3>
     <div class="row2">
       <div>
         <label for="nkName">Name (what it's for)</label>
@@ -581,7 +595,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 
 <!-- Organize-systems modal (admin) -->
 <div class="modal-back" id="orgModal">
-  <div class="modal" style="max-width:620px" role="dialog" aria-modal="true" aria-labelledby="orgTitle">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="orgTitle">
     <h3 id="orgTitle">Organize systems</h3>
     <div class="sub">Group your firewalls into categories and drag them into the
       order you want on the Overview. Double-click a category name to rename
@@ -604,7 +618,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 
 <!-- Styled replacements for window.confirm / window.prompt -->
 <div class="modal-back stacked" id="confirmModal">
-  <div class="modal" style="max-width:420px" role="alertdialog" aria-modal="true"
+  <div class="modal narrow" role="alertdialog" aria-modal="true"
        aria-labelledby="confirmTitle" aria-describedby="confirmText">
     <h3 id="confirmTitle"></h3>
     <div class="sub" id="confirmText"></div>
@@ -615,7 +629,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
   </div>
 </div>
 <div class="modal-back stacked" id="promptModal">
-  <div class="modal" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+  <div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
     <h3 id="promptTitle"></h3>
     <div class="sub" id="promptText"></div>
     <label for="promptInput" id="promptLabel"></label>
@@ -629,9 +643,10 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 
 <script>
 "use strict";
-const ACTION_COLOR = { Allow:"var(--good)", Block:"var(--critical)",
-  Drop:"var(--critical)", Reject:"var(--serious)", NAT:"var(--nat)",
-  "?":"var(--muted)" };
+// Badge colours are CSS classes (.dot.act-*), never inline styles: the page's
+// CSP allows no style attributes, only the nonce'd stylesheet + CSSOM.
+const ACTION_CLASS = { Allow:"allow", Block:"block", Drop:"drop",
+  Reject:"reject", NAT:"nat", "?":"unknown" };
 const VENDOR_LABEL = { unifi:"UniFi", sophos:"Sophos", auto:"auto" };
 const BLOCKED = new Set(["Block","Drop","Reject"]);
 const KEEP = 3000, SHOW = 600;
@@ -639,6 +654,18 @@ const WINDOW_BATCH = 2000, WINDOW_MAX = 10000;  // per-page / on-screen caps for
 const RECV_SECS = 120, QUIET_SECS = 900;   // status thresholds
 
 const $ = id => document.getElementById(id);
+// Elements that start hidden are marked data-init-hidden (CSS hides them
+// until this runs). Convert that to the same inline display:none the code
+// has always toggled via el.style.display — a CSSOM write, which the CSP
+// permits, unlike a style attribute in the markup.
+document.querySelectorAll("[data-init-hidden]").forEach(el => {
+  el.style.display = "none"; el.removeAttribute("data-init-hidden");
+});
+// Sparkline bar heights travel as data-h and are applied here after the
+// HTML is inserted (same CSP reason).
+function applyBarHeights(root) {
+  root.querySelectorAll("[data-h]").forEach(el => { el.style.height = el.dataset.h + "%"; });
+}
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = n => Number(n).toLocaleString("en-US");
@@ -943,6 +970,7 @@ function renderOverview() {
         setCatCollapsed(sec.dataset.cat, on);
       }));
   }
+  applyBarHeights($("sysWrap"));
   $("sysWrap").querySelectorAll(".sys-card").forEach(c =>
     c.addEventListener("click", () => go(c.dataset.view)));
 }
@@ -982,7 +1010,9 @@ function sparkHtml(d) {
     // Bars stack from the baseline up (column, justify-end): red blocked share
     // at the bottom, blue NAT share above it. No inline height when flat, so
     // the 2px baseline from .spark.flat applies.
-    return `<span class="bar${i === hist.length - 1 ? " now" : ""}"${flat ? "" : ` style="height:${hPct}%"`} title="${t}"><i class="n" style="height:${nPct}%"></i><i style="height:${bPct}%"></i></span>`;
+    // Heights ride along as data-h and are applied via the CSSOM after the
+    // HTML lands (applyBarHeights): the CSP forbids inline style attributes.
+    return `<span class="bar${i === hist.length - 1 ? " now" : ""}"${flat ? "" : ` data-h="${hPct}"`} title="${t}"><i class="n" data-h="${nPct}"></i><i data-h="${bPct}"></i></span>`;
   }).join("");
   return `<div class="spark${flat ? " flat" : ""}" title="Events per minute, last 15 min (red = blocked, blue = NAT)">${bars}</div>`;
 }
@@ -1043,7 +1073,7 @@ function rowHtml(e) {
     <td class="ip" data-f="dst" data-v="${esc(e.dst)}">${esc(e.dst)}${flagHtml(e.dst_cc)}</td>
     <td data-f="proto" data-v="${esc(e.proto)}">${esc(e.proto)}</td>
     ${port}
-    <td data-f="act" data-v="${esc(e.action)}"><span class="badge"><span class="dot" style="background:${ACTION_COLOR[e.action]||"var(--muted)"}"></span>${esc(e.action)}</span></td>
+    <td data-f="act" data-v="${esc(e.action)}"><span class="badge"><span class="dot act-${ACTION_CLASS[e.action]||"unknown"}"></span>${esc(e.action)}</span></td>
     <td data-f="rule" data-v="${esc(e.rule)}">${esc(e.rule)}</td></tr>`;
 }
 // Country flag for a public IP (src_cc/dst_cc set by the server). Rendered
@@ -1700,7 +1730,7 @@ async function refreshUsers() {
          </select>`}</td>
     <td>${u.email ? esc(u.email) : '<span class="sub">no email</span>'}</td>
     <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
-    <td style="text-align:right">
+    <td class="ta-r">
       <button class="linkbtn" data-email="${u.id}" data-cur="${esc(u.email || "")}" data-name="${esc(u.username)}">Email</button>
       ${u.id === me.id ? ' <span class="sub">you</span>'
         : ` · <button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
@@ -1792,7 +1822,7 @@ async function refreshKeys() {
       <td>${used}<div class="sub">created ${esc(fmtWhen(k.created_at))}${
         k.created_by ? " by " + esc(k.created_by) : ""}</div></td>
       <td>${exp}</td>
-      <td style="text-align:right"><button class="linkbtn" data-revoke="${k.id}"
+      <td class="ta-r"><button class="linkbtn" data-revoke="${k.id}"
         data-name="${esc(k.name)}">Revoke</button></td></tr>`;
   }).join("") : `<tr><td class="sub" colspan="4">No API keys yet.</td></tr>`;
   $("keyRows").querySelectorAll("[data-revoke]").forEach(b =>
