@@ -1,7 +1,7 @@
 {
   "source": "RIR delegated-extended files",
   "flags": "flag-icons 7.2.3 (MIT)",
-  "ipv4_ranges": 261106,
-  "ipv6_ranges": 70527,
+  "ipv4_ranges": 261542,
+  "ipv6_ranges": 70763,
   "countries": 239
 }
