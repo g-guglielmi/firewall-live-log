@@ -468,6 +468,38 @@ class AuthManager:
             return None, "invalid username or password", 0
         return user, None, 0
 
+    def verify_current_password(self, user_id, password, ip):
+        """Re-authenticate a signed-in user (password change). Same rules as a
+        login: the lockout tiers apply, the hash runs outside the DB lock and
+        under ``_hash_slots``, and a failure is recorded as a login attempt —
+        so a hijacked session can't guess the real password unthrottled, nor
+        turn this route into the CPU sink the login path is protected from.
+
+        Returns True/False; raises AuthError(429) while locked out."""
+        user = self.get_user_by_id(user_id)
+        if not user or not _plausible_credentials(user["username"], password):
+            return False
+        username = user["username"]
+        now = int(time.time())
+        with self.lock:
+            locked_until = self._locked_until(username, ip, now)
+        if locked_until:
+            raise AuthError("too many failed attempts; try again later", 429,
+                            retry_after=max(1, locked_until - now))
+        with self._hash_slots:
+            ok = verify_password(password, user["_pw_hash"])
+        with self.lock:
+            if ok:
+                self.db.execute(
+                    "DELETE FROM login_attempts WHERE username = ? "
+                    "COLLATE NOCASE AND success = 0", (username,))
+            else:
+                self.db.execute(
+                    "INSERT INTO login_attempts (username, ip, ts, success) "
+                    "VALUES (?,?,?,0)", (username, ip, now))
+            self.db.commit()
+        return ok
+
     # -- sessions ----------------------------------------------------------
     def create_session(self, user_id):
         token = secrets.token_urlsafe(32)

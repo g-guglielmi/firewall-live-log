@@ -137,6 +137,20 @@ jobs:
           test "$(sudo stat -c %u /tmp/fll-strict)" = "0"
           docker rm -f fll-strict
 
+      # Known-vulnerability scan of the exact image about to ship (OS packages
+      # of the pinned Debian base). A fixable CRITICAL/HIGH fails the release;
+      # unfixed ones are reported but don't block, since nothing can be done
+      # about them until Debian ships a fix (Dependabot then bumps the digest).
+      - name: Vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: fll-smoke:test
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io

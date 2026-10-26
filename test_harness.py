@@ -573,6 +573,8 @@ def main():
     check("index CSP uses a style nonce and no 'unsafe-inline'",
           "style-src 'nonce-" in csp and "unsafe-inline" not in csp
           and '<style nonce="' in html, csp[:120])
+    check("index CSP img-src is 'self' only (no data:)",
+          "img-src 'self';" in csp and "data:" not in csp, csp[:160])
     # A style nonce only holds if the pages carry no style="" attributes at
     # all (CSP blocks them even with a nonce), so prove that for each page.
     inline = {}
@@ -902,6 +904,88 @@ def main():
           code == 200 and code2 == 200, f"{code} {code2}")
     request("DELETE", f"/api/users/{temp_id}", csrf=True)
 
+    print("== hardening: re-auth throttle, id parsing, csrf bytes ==")
+    # A non-ASCII CSRF header must be a plain 403, never a 500 (str
+    # compare_digest raises TypeError on non-ASCII).
+    code, body, _ = request("POST", "/api/layout", {"categories": []},
+                            headers={"X-CSRF-Token": "\xe9\xe8-not-the-token"})
+    check("non-ASCII CSRF header -> 403 (not 500)",
+          code == 403 and "CSRF" in body.get("error", ""), f"{code} {body}")
+    # JSON true is not a record id (isinstance(True, int) is True).
+    for p, extra in (("/api/users/set_email", {"email": "x@example.test"}),
+                     ("/api/users/set_role", {"role": "user"}),
+                     ("/api/users/reset_password",
+                      {"new_password": "Whatever-Password-1"})):
+        code, body, _ = request("POST", p, {"id": True, **extra}, csrf=True)
+        check(f"{p} rejects id=true (400)", code == 400, f"{code} {body}")
+    # A Unicode digit in the URL (0xB2 = "²" in the header charset) passes
+    # str.isdigit() but not int(); must be a 400, not a 500.
+    sess = next(c.value for c in _CJ if c.name == "session")
+    raw = (f"DELETE /api/users/\xb2 HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+           f"Cookie: session={sess}\r\nX-CSRF-Token: {_CSRF['token']}\r\n"
+           f"Content-Length: 0\r\n\r\n").encode("latin-1")
+    with socket.create_connection(("127.0.0.1", HTTP_PORT), timeout=10) as rs:
+        rs.sendall(raw)
+        resp = b""
+        while True:
+            chunk = rs.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+    status = resp.split(b" ", 2)[1] if resp.startswith(b"HTTP/") else b"?"
+    check("DELETE /api/users/<unicode digit> -> 400 (not 500)",
+          status == b"400", resp[:120])
+    # The change-password current-password check is throttled like a login:
+    # five wrong guesses lock the (username, ip) pair for this route AND
+    # for /api/login, and the 6th answers 429 with Retry-After.
+    code, body, _ = request("POST", "/api/users",
+                            {"username": "pwguess",
+                             "password": "Guessable-Pass-5566"}, csrf=True)
+    guess_id = body.get("id")
+    gj = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+    def gcall(method, path, obj=None, csrf_tok=None):
+        data = json.dumps(obj).encode() if obj is not None else None
+        req = urllib.request.Request(BASE + path, data=data, method=method)
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        if csrf_tok:
+            req.add_header("X-CSRF-Token", csrf_tok)
+        try:
+            r = gj.open(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            r = e
+        rawb = r.read()
+        try:
+            parsed = json.loads(rawb) if rawb else {}
+        except ValueError:
+            parsed = {}
+        return (r.status if hasattr(r, "status") else r.code), parsed, r
+    code, lb, _ = gcall("POST", "/api/login", {"username": "pwguess",
+                                               "password": "Guessable-Pass-5566"})
+    gcsrf = lb.get("csrf_token", "")
+    codes = []
+    for i in range(5):
+        code, _, _ = gcall("POST", "/api/change_password",
+                           {"current_password": f"wrong-guess-{i}",
+                            "new_password": "Another-Password-7788"}, gcsrf)
+        codes.append(code)
+    check("wrong current password -> 403 x5", codes == [403] * 5, str(codes))
+    code, body, r6 = gcall("POST", "/api/change_password",
+                           {"current_password": "Guessable-Pass-5566",
+                            "new_password": "Another-Password-7788"}, gcsrf)
+    check("6th current-password check is locked out (429 + Retry-After)",
+          code == 429 and bool(r6.headers.get("Retry-After")), f"{code} {body}")
+    code, _, _ = gcall("POST", "/api/login", {"username": "pwguess",
+                                              "password": "Guessable-Pass-5566"})
+    check("the same lockout applies to /api/login for that user (429)",
+          code == 429, str(code))
+    code, _, _ = gcall("GET", "/api/me")
+    check("the existing session itself keeps working (200)", code == 200,
+          str(code))
+    request("DELETE", f"/api/users/{guess_id}", csrf=True)
+
     print("== hardening: syslog validation + csv formula injection ==")
     send(unifi_line("WAN_IN-D-7001", "=HYPERLINK(evil)",
                     "198.51.100.7", "10.0.10.5", "TCP", 3389), P_UNIFI)
@@ -963,6 +1047,14 @@ def main():
                           {"username_or_email": "nobody@example.test"})
     check("forgot for unknown -> generic 200", code == 200 and body.get("ok"),
           str(body))
+    # Attacker-sized identifiers are truncated before they reach the log.
+    code, _, _ = request("POST", "/api/forgot_password",
+                         {"username_or_email": "Z" * 3000 + "@example.test"})
+    time.sleep(0.5)
+    long_lines = [l for l in out if "unknown account" in l and "ZZZZ" in l]
+    check("forgot: oversized identifier is truncated in the log",
+          code == 200 and long_lines and all(len(l) < 200 for l in long_lines),
+          f"{code} {[len(l) for l in long_lines]}")
     # Real user with an email: generic 200, and an email file appears.
     code, body, _ = request("POST", "/api/forgot_password",
                           {"username_or_email": "viewer1@example.test"})
@@ -1185,6 +1277,28 @@ def main():
           == "198.51.100.7")
     check("client ip: trusted proxy without the header -> peer",
           webmod.client_ip_from("10.0.0.5", None, nets) == "10.0.0.5")
+    check("client ip: a non-address last hop falls back to the peer",
+          webmod.client_ip_from("10.0.0.5", "1.2.3.4, evil-string", nets)
+          == "10.0.0.5"
+          and webmod.client_ip_from("10.0.0.5", "x, 2001:db8::7", nets)
+          == "2001:db8::7")
+    check("id parsing: unicode digits / bools are not ids",
+          webmod._path_id("12") == 12 and webmod._path_id("²") is None
+          and webmod._path_id("") is None and webmod._path_id("-1") is None
+          and webmod._body_id(3) == 3 and webmod._body_id(True) is None
+          and webmod._body_id(0) is None and webmod._body_id("3") is None)
+    # The untrusted-forward warning table must stay bounded however many
+    # distinct peers show up (quiet the warnings while we flood it).
+    import io as iomod
+    saved_err, sys.stderr = sys.stderr, iomod.StringIO()
+    try:
+        for i in range(webmod._FWD_WARN_MAX + 500):
+            webmod.warn_untrusted_forward(f"2001:db8::{i:x}", "X-Forwarded-For")
+    finally:
+        sys.stderr = saved_err
+    check("untrusted-forward warning table is capped",
+          len(webmod._fwd_warned) <= webmod._FWD_WARN_MAX,
+          str(len(webmod._fwd_warned)))
     try:
         webmod.parse_trusted_proxies("not-an-ip")
         bad = False

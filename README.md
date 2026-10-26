@@ -583,7 +583,10 @@ to wipe all accounts and start over.
   `X-Forwarded-For` and friends are ordinary request headers anyone can
   send, so they are honoured only when the TCP peer is listed in
   `TRUSTED_PROXIES`; otherwise the real peer address is used and the header
-  is logged once (`ignoring X-Forwarded-For from untrusted peer …`). Behind
+  is logged once (`ignoring X-Forwarded-For from untrusted peer …`). The
+  forwarded value must itself parse as an IP address, or the peer address
+  is used instead (a proxy that passes a client's header through unchanged
+  can't hand the client an arbitrary lockout key). Behind
   a proxy **set `TRUSTED_PROXIES` to the proxy's address**, or every user
   shares the proxy's IP for the per-IP lockout and the `Secure` flag is not
   set automatically. The dashboard is always reachable directly by IP as
@@ -616,13 +619,18 @@ to wipe all accounts and start over.
   `Retry-After`. Unknown usernames still run a full password hash so
   response timing never reveals whether a user exists, and hashing never
   runs while the auth DB lock is held, so a login flood can't stall the
-  dashboard for signed-in users.
+  dashboard for signed-in users. The *current password* check in the
+  change-password dialog follows the same rules (counted and locked like a
+  login), so a hijacked session can't guess the real password unthrottled.
 - **Pre-auth CPU hygiene** — the reset-link endpoint checks the token
   before hashing the new password and is rate-limited per IP; requests that
   can't be a real login (malformed username, oversized password) are
   rejected before any hashing or DB write. The web server drops clients
   that stall a request for 30 s and answers `503` beyond 200 concurrent
-  connections.
+  connections; the forgot-password endpoint processes at most a handful
+  of requests at a time (the reply is the same generic `200` regardless),
+  and the once-per-peer "untrusted proxy header" log table is capped so
+  rotating source addresses can't grow the process.
 - **CSRF** — every state-changing request must also carry a session-bound
   token in the `X-CSRF-Token` header, and browser requests from another
   site are refused outright (`Sec-Fetch-Site`, falling back to `Origin`
@@ -685,10 +693,13 @@ completely open.
   likewise. The seeded `devices.json` stays `0644` so you can read and edit
   it from the host.
 - **Supply chain.** The base image is pinned by digest and every GitHub
-  Action by commit SHA (Dependabot proposes bumps); the quarterly geo
-  refresh verifies the `flag-icons` tarball against its pinned integrity
-  hash and refuses any SVG containing scripts, event handlers or external
-  references.
+  Action by commit SHA (Dependabot proposes bumps); every release runs a
+  [Trivy](https://github.com/aquasecurity/trivy) scan of the exact image
+  about to ship and fails on a fixable CRITICAL/HIGH OS-package CVE; the
+  quarterly geo refresh verifies the `flag-icons` tarball against its
+  pinned integrity hash and refuses any SVG containing scripts, event
+  handlers or external references. CI workflows run with a read-only
+  token.
 - That non-root user cannot bind UDP ports below 1024. Assign collection
   ports ≥ 1024 in `devices.json` (the examples use 5514+). If a firewall
   can only send to 514, remap it on the host (e.g. a `PREROUTING` DNAT to

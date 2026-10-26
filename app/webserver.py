@@ -72,26 +72,44 @@ def client_ip_from(peer, xff, trusted):
     of that header — the address the proxy itself saw, which is the only part
     of the list the client can't have written."""
     if xff and peer_is_trusted(peer, trusted):
-        last = xff.split(",")[-1].strip()[:64]
-        if last:
-            return last
+        last = xff.split(",")[-1].strip()
+        # Must parse as an address: a proxy that passes the client's header
+        # through instead of appending would otherwise let the client pick
+        # an arbitrary string as its lockout key.
+        try:
+            return str(ipaddress.ip_address(last))
+        except ValueError:
+            pass
     return peer
 
 
 _fwd_warn_lock = threading.Lock()
 _fwd_warned = {}                      # peer -> last warning time (monotonic)
 _FWD_WARN_INTERVAL = 3600
+_FWD_WARN_MAX = 4096                  # bound the table: peers are attacker-chosen
 
 
 def warn_untrusted_forward(peer, header):
     """Log (at most hourly per peer) that a forwarded header from an
     untrusted address was ignored — so an operator who put a proxy in front
-    without setting TRUSTED_PROXIES finds out on the first request."""
+    without setting TRUSTED_PROXIES finds out on the first request.
+
+    The table is capped: a client rotating through source addresses (an
+    IPv6 /64, say) must not grow the process without limit. Expired entries
+    are evicted when the cap is hit; if it is still full the peer is ignored
+    silently (that only happens under a flood, which the earlier warnings
+    already announced)."""
     now = time.monotonic()
     with _fwd_warn_lock:
         last = _fwd_warned.get(peer)
         if last is not None and now - last < _FWD_WARN_INTERVAL:
             return
+        if last is None and len(_fwd_warned) >= _FWD_WARN_MAX:
+            for k in [k for k, t in _fwd_warned.items()
+                      if now - t >= _FWD_WARN_INTERVAL]:
+                del _fwd_warned[k]
+            if len(_fwd_warned) >= _FWD_WARN_MAX:
+                return
         _fwd_warned[peer] = now
     print(f"[web] ignoring {header} from untrusted peer {peer}; if that is "
           "your reverse proxy, add it to TRUSTED_PROXIES (see README)",
@@ -192,6 +210,24 @@ def _filters_from(params):
 
 
 MAX_CATEGORIES = 50
+
+# Record ids from a URL tail or a JSON body. str.isdigit() also accepts
+# Unicode digits ("²") that int() then rejects (a 500), and isinstance(x, int)
+# lets JSON true/false through as 1/0 — so be explicit about both.
+_ID_RE = re.compile(r"[0-9]{1,18}")
+
+
+def _path_id(tail):
+    """int id from a URL path tail, or None when it isn't a plain number."""
+    return int(tail) if _ID_RE.fullmatch(tail) else None
+
+
+def _body_id(value):
+    """int id from a JSON body value, or None (bools and out-of-range
+    numbers are not ids)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 < value < 2**53 else None
 
 
 def _validate_layout(cats, valid_names):
@@ -363,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
                 "default-src 'none'; "
                 f"script-src 'nonce-{nonce}'; "
                 f"style-src 'nonce-{nonce}'; "
-                "img-src 'self' data:; connect-src 'self'; "
+                "img-src 'self'; connect-src 'self'; "
                 "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         else:
             h["Content-Security-Policy"] = (
@@ -533,7 +569,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _check_csrf(self, csrf):
         got = self.headers.get("X-CSRF-Token", "")
-        return bool(csrf) and secrets.compare_digest(got, csrf)
+        # Compare as bytes: compare_digest() on str raises TypeError for a
+        # non-ASCII value (a crafted header would turn the 403 into a 500).
+        return bool(csrf) and secrets.compare_digest(
+            got.encode("utf-8", "replace"), csrf.encode("utf-8"))
 
     # Routes a session whose password must still be changed may use. Anything
     # else answers 403 until the change is done, so a temporary password
@@ -795,11 +834,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.auth:
                     self._json({"error": "authentication is disabled"}, 400)
                     return
-                tail = path[len(kprefix):]
-                if not tail.isdigit():
+                key_id = _path_id(path[len(kprefix):])
+                if key_id is None:
                     self._json({"error": "key id must be numeric"}, 400)
                     return
-                self.auth.delete_api_key(int(tail))
+                self.auth.delete_api_key(key_id)
                 self._json({"ok": True})
                 return
             prefix = "/api/users/"
@@ -807,11 +846,10 @@ class Handler(BaseHTTPRequestHandler):
                 if user["role"] != "admin":
                     self._json({"error": "admin required"}, 403)
                     return
-                tail = path[len(prefix):]
-                if not tail.isdigit():
+                target = _path_id(path[len(prefix):])
+                if target is None:
                     self._json({"error": "user id must be numeric"}, 400)
                     return
-                target = int(tail)
                 if target == user["id"]:
                     self._json({"error": "cannot delete your own account"},
                                400)
@@ -859,8 +897,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         current = body.get("current_password", "")
         new = body.get("new_password", "")
-        full = self.auth.get_user_by_id(user["id"])
-        if not full or not auth_mod.verify_password(current, full["_pw_hash"]):
+        # Throttled + lockout-aware like a login (AuthError 429 -> do_POST).
+        if not self.auth.verify_current_password(user["id"], current,
+                                                 self._client_ip()):
             self._json({"error": "current password is incorrect"}, 403)
             return
         if current == new:
@@ -888,9 +927,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "admin required"}, 403)
             return
         body = self._read_json_body()
-        target = body.get("id")
+        target = _body_id(body.get("id"))
         new = body.get("new_password", "")
-        if not isinstance(target, int):
+        if target is None:
             self._json({"error": "id must be an integer"}, 400)
             return
         self.auth.set_password(target, new, must_change_pw=True)
@@ -898,8 +937,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_set_email(self, user):
         body = self._read_json_body()
-        target = body.get("id")
-        if not isinstance(target, int):
+        target = _body_id(body.get("id"))
+        if target is None:
             self._json({"error": "id must be an integer"}, 400)
             return
         # A user may set their own email; only an admin may set another's.
@@ -914,9 +953,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "admin required"}, 403)
             return
         body = self._read_json_body()
-        target = body.get("id")
+        target = _body_id(body.get("id"))
         role = body.get("role")
-        if not isinstance(target, int):
+        if target is None:
             self._json({"error": "id must be an integer"}, 400)
             return
         # Don't let an admin demote themselves mid-session and get locked out
@@ -994,9 +1033,14 @@ class Handler(BaseHTTPRequestHandler):
         if (self.auth_enabled and self.auth and self.mailer
                 and self.mailer.configured and self.public_url
                 and isinstance(identifier, str) and identifier.strip()):
-            threading.Thread(target=self._process_forgot,
-                             args=(identifier.strip(), ip),
-                             daemon=True).start()
+            # Bounded: at most _FORGOT_WORKERS lookups/sends in flight, so a
+            # flood of requests can't pile up threads (each may spend the
+            # SMTP timeout). Beyond that the request is dropped — the reply
+            # is the same generic 200 either way.
+            if _forgot_slots.acquire(blocking=False):
+                threading.Thread(target=self._process_forgot_guarded,
+                                 args=(identifier.strip()[:254], ip),
+                                 daemon=True).start()
         elif self.auth_enabled and identifier and not (
                 self.mailer and self.mailer.configured and self.public_url):
             print("[mail] password-reset requested but email/PUBLIC_URL is "
@@ -1004,12 +1048,19 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "message": "If an account with that username "
                     "or email exists, a reset link has been sent."})
 
+    def _process_forgot_guarded(self, identifier, ip):
+        try:
+            self._process_forgot(identifier, ip)
+        finally:
+            _forgot_slots.release()
+
     def _process_forgot(self, identifier, ip):
         try:
             u = self.auth.find_user_for_reset(identifier)
             if not u:
+                # Attacker-supplied text: keep the log line short.
                 print(f"[mail] reset requested for unknown account "
-                      f"{identifier!r} — nothing sent", flush=True)
+                      f"{identifier[:80]!r} — nothing sent", flush=True)
                 return
             if not u.get("email"):
                 print(f"[mail] reset requested for user {u['username']!r} "
@@ -1061,6 +1112,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+
+_FORGOT_WORKERS = 8
+_forgot_slots = threading.BoundedSemaphore(_FORGOT_WORKERS)
 
 _CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
 
