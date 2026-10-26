@@ -14,6 +14,9 @@ Configuration:
   HTTP_BIND        dashboard bind address    (default 0.0.0.0)
   TRUSTED_PROXIES  reverse-proxy IPs/CIDRs whose X-Forwarded-* headers
                    are believed (default: none)
+  SYSLOG_BIND      address the collector ports listen on (default 0.0.0.0)
+  SYSLOG_ALLOWED_SOURCES  firewall IPs/CIDRs allowed to send syslog;
+                   anything else is discarded (default: accept all)
   RETENTION_DAYS   overrides config value    (default 14)
   MAX_EVENTS       row-count safety cap, 0=off (overrides config)
   PRUNE_INTERVAL_SEC  retention sweep period (default 3600)
@@ -237,9 +240,19 @@ def main():
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
     try:
         trusted_proxies = webserver.parse_trusted_proxies(env("TRUSTED_PROXIES"))
+        syslog_sources = webserver.parse_trusted_proxies(
+            env("SYSLOG_ALLOWED_SOURCES"), name="SYSLOG_ALLOWED_SOURCES")
     except ValueError as e:
         print(f"[web] {e}", file=sys.stderr)
         sys.exit(2)
+    syslog_bind = env("SYSLOG_BIND", "0.0.0.0")
+    if syslog_sources:
+        print("[listener] syslog accepted only from: "
+              + ", ".join(str(n) for n in syslog_sources))
+    else:
+        print("[listener] SYSLOG_ALLOWED_SOURCES not set — syslog is accepted "
+              "from any address that can reach the collector ports",
+              file=sys.stderr)
     auth_manager = setup_auth()
     mailer = mailer_mod.from_env(env)
     public_url = normalize_public_url(env("PUBLIC_URL"))
@@ -258,6 +271,17 @@ def main():
             print("[mail] WARNING: SMTP TLS certificate verification is "
                   "DISABLED (SMTP_TLS_INSECURE) — connection is encrypted but "
                   "the server certificate is not validated", file=sys.stderr)
+        if mailer.configured and mailer.plain_auth_blocked:
+            print("[mail] SMTP_SECURITY=none with SMTP_USERNAME set: the "
+                  "password would cross the network in clear, so sends are "
+                  "REFUSED. Use starttls/ssl, or set "
+                  "SMTP_ALLOW_PLAINTEXT_AUTH=true to accept the risk.",
+                  file=sys.stderr)
+        elif mailer.configured and mailer.username \
+                and mailer.security == "none":
+            print("[mail] WARNING: SMTP AUTH over a cleartext connection "
+                  "(SMTP_ALLOW_PLAINTEXT_AUTH=true) — the SMTP password is "
+                  "readable on the wire", file=sys.stderr)
 
     # Create the schema synchronously so the web server's read-only
     # connection can never open before the file exists.
@@ -272,8 +296,9 @@ def main():
 
     q = queue.Queue(maxsize=queue_max)
     # Shared listener counters: n = datagrams dropped on a full queue,
-    # ignored = non-firewall host syslog discarded before the queue.
-    drops = {"n": 0, "ignored": 0, "lock": threading.Lock()}
+    # ignored = non-firewall host syslog discarded before the queue,
+    # rejected = datagrams from a source not in SYSLOG_ALLOWED_SOURCES.
+    drops = {"n": 0, "ignored": 0, "rejected": 0, "lock": threading.Lock()}
     stop_event = threading.Event()
 
     def on_signal(signum, frame):
@@ -292,7 +317,8 @@ def main():
     listener_threads = []
     for device in cfg.devices:
         t = threading.Thread(target=listener.run, name=f"listen-{device.name}",
-                             args=(stop_event, device, q, drops), daemon=True)
+                             args=(stop_event, device, q, drops,
+                                   syslog_sources, syslog_bind), daemon=True)
         t.start()
         listener_threads.append(t)
 

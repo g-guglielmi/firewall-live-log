@@ -9,6 +9,7 @@ connection guarded by a lock.  WAL mode lets reads proceed during writes.
 import os
 import sqlite3
 import time
+import urllib.parse
 
 SCHEMA_VERSION = "1"
 
@@ -57,7 +58,10 @@ def open_writer(path):
 
 
 def open_reader(path):
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10,
+    # Percent-encode the path: a directory name containing "?", "#" or "%"
+    # would otherwise be parsed as URI syntax (SQLite decodes %XX itself).
+    quoted = urllib.parse.quote(path, safe="/")
+    return sqlite3.connect(f"file:{quoted}?mode=ro", uri=True, timeout=10,
                            check_same_thread=False)
 
 
@@ -117,6 +121,16 @@ def prune(db, retention_days, max_events, unparsed_cap=10000):
 # Read queries (reader connection)
 # --------------------------------------------------------------------------
 _BLOCK_ACTIONS = ("Block", "Drop", "Reject")
+_LIKE_ESCAPE = " ESCAPE '\\'"
+
+
+def _like(value):
+    """A literal substring pattern: the user's "%" and "_" are escaped so
+    they match themselves instead of acting as LIKE wildcards (a bare "%"
+    would otherwise match every row, forcing the widest possible scan)."""
+    v = (str(value).replace("\\", "\\\\").replace("%", "\\%")
+         .replace("_", "\\_"))
+    return f"%{v}%"
 
 
 def _filter_clauses(f):
@@ -131,8 +145,8 @@ def _filter_clauses(f):
         clauses.append("vendor = ?")
         args.append(f["vendor"])
     if f.get("ip"):
-        clauses.append("(src LIKE ? OR dst LIKE ?)")
-        like = f"%{f['ip']}%"
+        clauses.append(f"(src LIKE ?{_LIKE_ESCAPE} OR dst LIKE ?{_LIKE_ESCAPE})")
+        like = _like(f["ip"])
         args += [like, like]
     # src/dst/rule/proto are substring matches; a leading "!" negates
     # (exclude matching rows) so noise can be filtered out.
@@ -141,11 +155,11 @@ def _filter_clauses(f):
         val = f.get(key)
         if val:
             if str(val).startswith("!"):
-                clauses.append(f"{col} NOT LIKE ?")
-                args.append(f"%{str(val)[1:]}%")
+                clauses.append(f"{col} NOT LIKE ?{_LIKE_ESCAPE}")
+                args.append(_like(str(val)[1:]))
             else:
-                clauses.append(f"{col} LIKE ?")
-                args.append(f"%{val}%")
+                clauses.append(f"{col} LIKE ?{_LIKE_ESCAPE}")
+                args.append(_like(val))
     if f.get("port"):
         # Prefix match so the result narrows as the user types ("44"
         # matches 443 and 445).  "=" forces an exact match ("=80" excludes

@@ -265,6 +265,8 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `DB_PATH` | `/data/events.db` | SQLite file (on the bind mount). |
 | `LAYOUT_PATH` | `<db dir>/layout.json` | Overview grouping/order (admin-managed via the GUI). |
 | `HTTP_PORT` / `HTTP_BIND` | `8080` / `0.0.0.0` | Dashboard/API. |
+| `SYSLOG_ALLOWED_SOURCES` | _(accept all)_ | Comma-separated IPs/CIDRs of your firewalls (e.g. `192.168.1.1, 10.0.0.0/24`). When set, a syslog datagram from any other address is discarded before it is parsed (counted as *rejected*, logged once per source per hour). Strongly recommended: syslog is unauthenticated. |
+| `SYSLOG_BIND` | `0.0.0.0` | Address the collector UDP ports listen on inside the container (`::` for IPv6 + IPv4). |
 | `RETENTION_DAYS` | `14` | Overrides the config value. |
 | `MAX_EVENTS` | `0` | Row-count cap (0 = off); overrides config. |
 | `PRUNE_INTERVAL_SEC` | `3600` | How often retention is enforced. |
@@ -285,9 +287,10 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | _(none)_ | SMTP auth credentials (omit for an unauthenticated relay). |
 | `SMTP_FROM` | _(none)_ | Envelope/`From` address for sent mail. Required to send. |
 | `SMTP_FROM_NAME` | _(none)_ | Optional display name for the `From` header. |
-| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none`. |
+| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none`. With `none` **and** a username, sends are refused (the password would cross the network in clear) unless `SMTP_ALLOW_PLAINTEXT_AUTH=true`. |
+| `SMTP_ALLOW_PLAINTEXT_AUTH` | `false` | Accept sending SMTP credentials over a cleartext connection (`SMTP_SECURITY=none`). Only for an isolated internal relay. |
 | `SMTP_TLS_INSECURE` | `false` | Skip TLS certificate verification (still encrypted). For internal relays with an expired/self-signed cert — use only when you understand the MITM trade-off. |
-| `SMTP_DEBUG` | `false` | Log the full SMTP protocol conversation to stderr (for diagnosing send failures). |
+| `SMTP_DEBUG` | `false` | Log the SMTP protocol conversation to stderr (for diagnosing send failures). The AUTH exchange is never logged. |
 | `MAIL_DEBUG_DIR` | _(none)_ | Dev/testing only: write emails to this directory **instead of** sending them over SMTP. Leave unset in production. |
 
 ## Sizing & retention
@@ -661,16 +664,24 @@ completely open.
 - Firewall logs are sensitive metadata about your network; protect the
   bind-mounted data directory accordingly.
 - **Syslog is unauthenticated UDP**: anything that can reach a collector
-  port can write rows. Keep those ports reachable only from your firewalls
+  port can write rows. **Set `SYSLOG_ALLOWED_SOURCES` to your firewalls'
+  addresses** — a datagram from anyone else is discarded before it is even
+  decoded (the *Dropped* tile shows a *rejected* count, and each source is
+  logged once an hour) — and keep the ports reachable only from them anyway
   (host firewall rule or a management VLAN). The parser validates every
   field at the edge — source/destination must be real IP addresses, rule
-  text is capped at 256 characters, ports at 0-65535 — and a line that
-  fails goes to the *Unparsed* counter instead of the table.
+  text is capped at 256 characters, ports at 0-65535 — a line that fails
+  goes to the *Unparsed* counter instead of the table, and an unparsed line
+  is stored truncated to 4 KB so junk can't park large rows between prunes.
 - **CSV export** prefixes any text cell that starts with `=`, `+`, `-`,
   `@` or a tab with an apostrophe, so a rule name crafted as a spreadsheet
   formula is shown as text when you open the file in Excel or LibreOffice.
   Real rule names and IPs never start with those characters, so normal
-  exports are unchanged; the JSON API returns rule text verbatim.
+  exports are unchanged; the JSON API returns rule text verbatim. The
+  export is streamed in pages of 10,000 rows, so even the largest download
+  never holds the database lock, or more than one page, at a time.
+- **Filters are literal.** `%` and `_` typed into the source, destination,
+  protocol or rule filter match themselves, not "anything".
 - The app runs as a non-root user (uid 10001, or `PUID`/`PGID`; `0` is
   refused). The container starts as root only long enough for the
   entrypoint to chown the data directories to that user — no socket is

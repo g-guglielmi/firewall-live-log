@@ -42,10 +42,10 @@ _MAX_BODY = 64 * 1024
 # ignored and the real peer address is used. Otherwise a client reaching the
 # container directly could spoof its address to dodge the per-IP lockouts.
 
-def parse_trusted_proxies(value):
-    """Parse the TRUSTED_PROXIES setting ("ip, cidr, ...", empty or "none" =
-    trust nobody) into a tuple of ip_network objects. Raises ValueError with
-    a readable message on a bad entry."""
+def parse_trusted_proxies(value, name="TRUSTED_PROXIES"):
+    """Parse an "ip, cidr, ..." setting (empty or "none" = nothing) into a
+    tuple of ip_network objects. Raises ValueError with a readable message
+    naming the setting on a bad entry. Shared with SYSLOG_ALLOWED_SOURCES."""
     nets = []
     for part in (value or "").split(","):
         part = part.strip()
@@ -54,7 +54,7 @@ def parse_trusted_proxies(value):
         try:
             nets.append(ipaddress.ip_network(part, strict=False))
         except ValueError:
-            raise ValueError(f"TRUSTED_PROXIES: {part!r} is not an IP or CIDR")
+            raise ValueError(f"{name}: {part!r} is not an IP or CIDR")
     return tuple(nets)
 
 
@@ -359,6 +359,7 @@ def _stats(state):
             "parsed": int(store.meta_get(db, "stat_parsed", "0")),
             "dropped": int(store.meta_get(db, "stat_dropped", "0")),
             "ignored": int(store.meta_get(db, "stat_ignored", "0")),
+            "rejected": int(store.meta_get(db, "stat_rejected", "0")),
             "devices": devices,
             "now": now,
         }
@@ -716,14 +717,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     self._json({"error": str(e)}, 400)
                     return
-                # CSV cannot page, so it keeps the unbounded (complete) scan.
-                events = self.state.query(
-                    lambda db: store.query_range(db, start_ts, end_ts, filters,
-                                                 limit, scan_span=None))[0]
-                self._send(200, _to_csv(events), "text/csv; charset=utf-8",
-                           {"Content-Disposition": 'attachment; filename="'
-                            + time.strftime("firewall-log-%Y%m%d-%H%M.csv")
-                            + '"'})
+                self._stream_csv(start_ts, end_ts, filters, limit)
                 return
             self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -1102,6 +1096,39 @@ class Handler(BaseHTTPRequestHandler):
             ip=self._client_ip())
         self._json({"ok": True})
 
+    # -- CSV export ----------------------------------------------------------
+    CSV_PAGE = 10_000
+
+    def _stream_csv(self, start_ts, end_ts, filters, limit):
+        """Write the export page by page instead of materialising up to
+        500k rows: each page is one short query under the shared reader lock
+        (released between pages, so other API calls interleave) and only one
+        page is ever in memory. The scan cap is off per page — the CSV must
+        be complete — but paging via ``before`` keeps every single query
+        bounded to CSV_PAGE rows."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="'
+                         + time.strftime("firewall-log-%Y%m%d-%H%M.csv") + '"')
+        self.send_header("Cache-Control", "no-store")
+        for k, v in self._security_headers().items():
+            self.send_header(k, v)
+        self.end_headers()                 # HTTP/1.0: EOF marks the end
+        if self.command == "HEAD":
+            return
+        before, sent, first = None, 0, True
+        while sent < limit:
+            page = min(self.CSV_PAGE, limit - sent)
+            events, more, before = self.state.query(
+                lambda db: store.query_range(db, start_ts, end_ts, filters,
+                                             page, before=before,
+                                             scan_span=None))
+            self.wfile.write(_to_csv(events, header=first).encode())
+            first = False
+            sent += len(events)
+            if not more or not events:
+                break
+
     def _safe_500(self, e):
         # The detail goes to the container log; the client gets a generic
         # body so internals (exception types, paths, SQL) are never exposed.
@@ -1128,13 +1155,14 @@ def _csv_safe(value):
     return "'" + s if s and s[0] in _CSV_FORMULA_LEADS else s
 
 
-def _to_csv(events):
+def _to_csv(events, header=True):
     import csv
     import io
     buf = io.StringIO()
     text_cols = ["device", "vendor", "src", "dst", "proto"]
     w = csv.writer(buf)
-    w.writerow(["time"] + text_cols + ["dst_port", "action", "rule"])
+    if header:
+        w.writerow(["time"] + text_cols + ["dst_port", "action", "rule"])
     for e in events:
         w.writerow([time.strftime("%Y-%m-%d %H:%M:%S",
                                   time.localtime(e["ts"]))]

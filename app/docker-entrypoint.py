@@ -19,7 +19,11 @@ root.
 
 The ownership fix-up is confined to the data tree (/data) and to separately
 mounted volumes; it never recurses into a system directory, so a mistyped
-DB_PATH=/etc/events.db cannot hand /etc to the runtime user.
+DB_PATH=/etc/events.db cannot hand /etc to the runtime user. Only the /data
+tree is chowned recursively: on any other mounted volume just the directory
+itself and the configured files (plus their SQLite sidecars) are touched, so
+pointing a *_PATH variable into a large host bind-mount can't re-own the
+whole tree.
 """
 import os
 import posixpath
@@ -79,22 +83,29 @@ def runtime_ids():
     return uid, gid
 
 
-def _chown_tree(path, uid, gid):
-    """chown path — and, for a directory, everything inside — to uid:gid,
-    skipping entries already owned correctly. Symlinks are changed but never
-    followed, so a link inside the volume can't redirect the chown outside."""
+def _chown_one(path, uid, gid):
+    """chown a single entry (never following a symlink). Returns the lstat
+    result, or None when the path is missing or the chown failed."""
     try:
         st = os.lstat(path)
     except OSError:
-        return
+        return None
     if st.st_uid != uid or st.st_gid != gid:
         try:
             os.lchown(path, uid, gid)
         except OSError as e:
             print(f"[entrypoint] warning: cannot chown {path}: {e}",
                   file=sys.stderr)
-            return
-    if stat.S_ISDIR(st.st_mode):
+            return None
+    return st
+
+
+def _chown_tree(path, uid, gid):
+    """chown path — and, for a directory, everything inside — to uid:gid,
+    skipping entries already owned correctly. Symlinks are changed but never
+    followed, so a link inside the volume can't redirect the chown outside."""
+    st = _chown_one(path, uid, gid)
+    if st is not None and stat.S_ISDIR(st.st_mode):
         try:
             names = os.listdir(path)
         except OSError:
@@ -103,22 +114,39 @@ def _chown_tree(path, uid, gid):
             _chown_tree(os.path.join(path, name), uid, gid)
 
 
+# SQLite sidecars that may sit next to a database file.
+_SIDECARS = ("", "-wal", "-shm", "-journal")
+
+_PATH_VARS = (("DB_PATH", "/data/events.db"),
+              ("AUTH_DB_PATH", "/data/auth.db"),
+              ("DEVICES_CONFIG", "/data/devices.json"),
+              ("LAYOUT_PATH", ""))
+
+
+def fixup_plan(env=_env):
+    """What the ownership fix-up will touch, as a sorted list of
+    ``(directory, recursive, files)``: the /data tree is handled recursively;
+    any other directory gets only itself plus the configured files in it.
+    Pure (no filesystem access), so it is unit-testable."""
+    targets = {DATA_ROOT: set()}
+    for var, default in _PATH_VARS:
+        p = env(var, default)
+        if p:
+            targets.setdefault(os.path.dirname(p) or DATA_ROOT, set()).add(p)
+    plan = []
+    for d in sorted(targets):
+        recursive = d == DATA_ROOT or d.startswith(DATA_ROOT + "/")
+        plan.append((d, recursive, sorted(targets[d])))
+    return plan
+
+
 def main():
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         # Strict mode (--user ...): never root, no ownership fix-up.
         os.execv(sys.executable, [sys.executable, APP])
     uid, gid = runtime_ids()
 
-    # Everything the app writes lives under these directories.
-    dirs = {DATA_ROOT}
-    for var, default in (("DB_PATH", "/data/events.db"),
-                         ("AUTH_DB_PATH", "/data/auth.db"),
-                         ("DEVICES_CONFIG", "/data/devices.json"),
-                         ("LAYOUT_PATH", "")):
-        p = _env(var, default)
-        if p:
-            dirs.add(os.path.dirname(p) or DATA_ROOT)
-    for d in sorted(dirs):
+    for d, recursive, files in fixup_plan():
         if not chown_allowed(d):
             print(f"[entrypoint] not fixing ownership of {d}: outside "
                   f"{DATA_ROOT} and not a mounted volume — make it writable "
@@ -130,7 +158,15 @@ def main():
             print(f"[entrypoint] warning: cannot create {d}: {e}",
                   file=sys.stderr)
             continue
-        _chown_tree(d, uid, gid)
+        if recursive:
+            _chown_tree(d, uid, gid)
+        else:
+            # A separately mounted volume: the directory and the named files
+            # only — never a recursive walk of a bind-mounted host tree.
+            _chown_one(d, uid, gid)
+            for f in files:
+                for suffix in _SIDECARS:
+                    _chown_one(f + suffix, uid, gid)
 
     # Drop privileges irrevocably, then become the app.
     os.setgroups([])

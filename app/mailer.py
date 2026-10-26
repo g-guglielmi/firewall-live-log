@@ -25,7 +25,8 @@ from email.message import EmailMessage
 class Mailer:
     def __init__(self, host=None, port=587, username=None, password=None,
                  sender=None, sender_name=None, security="starttls",
-                 debug_dir=None, timeout=15, tls_verify=True, debug=False):
+                 debug_dir=None, timeout=15, tls_verify=True, debug=False,
+                 allow_plain_auth=False):
         self.host = host or None
         try:
             self.port = int(port) if port else 587
@@ -40,6 +41,14 @@ class Mailer:
         self.timeout = timeout
         self.tls_verify = tls_verify
         self.debug = debug
+        self.allow_plain_auth = allow_plain_auth
+
+    @property
+    def plain_auth_blocked(self):
+        """True when the configuration would send SMTP AUTH over a cleartext
+        connection and the operator has not explicitly allowed that."""
+        return bool(self.username and self.security == "none"
+                    and not self.allow_plain_auth)
 
     def _context(self):
         """TLS context. With verification off, the connection is still
@@ -85,6 +94,12 @@ class Mailer:
                 return True
             if not (self.host and self.sender):
                 return False
+            if self.plain_auth_blocked:
+                # Decided before any connection is opened.
+                raise RuntimeError(
+                    "refusing SMTP AUTH over a cleartext connection "
+                    "(SMTP_SECURITY=none); use starttls/ssl, or set "
+                    "SMTP_ALLOW_PLAINTEXT_AUTH=true to accept the risk")
             ctx = self._context()
             if self.security == "ssl":
                 with smtplib.SMTP_SSL(self.host, self.port,
@@ -110,7 +125,19 @@ class Mailer:
 
     def _auth_and_send(self, s, msg):
         if self.username:
-            s.login(self.username, self.password or "")
+            if self.plain_auth_blocked:
+                raise RuntimeError(
+                    "refusing SMTP AUTH over a cleartext connection "
+                    "(SMTP_SECURITY=none); use starttls/ssl, or set "
+                    "SMTP_ALLOW_PLAINTEXT_AUTH=true to accept the risk")
+            # SMTP_DEBUG logs the wire conversation — never the AUTH
+            # exchange, which carries the password (base64, not encrypted).
+            level = getattr(s, "debuglevel", 0)
+            s.set_debuglevel(0)
+            try:
+                s.login(self.username, self.password or "")
+            finally:
+                s.set_debuglevel(level)
         s.send_message(msg)
 
     def send_async(self, to, subject, body):
@@ -138,7 +165,8 @@ def from_env(env):
         debug_dir=env("MAIL_DEBUG_DIR"),
         # Verification on by default; only off when explicitly disabled.
         tls_verify=not _truthy(env("SMTP_TLS_INSECURE", "false")),
-        debug=_truthy(env("SMTP_DEBUG", "false")))
+        debug=_truthy(env("SMTP_DEBUG", "false")),
+        allow_plain_auth=_truthy(env("SMTP_ALLOW_PLAINTEXT_AUTH", "false")))
 
 
 def reset_email_body(username, url, ttl_minutes):

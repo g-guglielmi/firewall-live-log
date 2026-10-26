@@ -938,7 +938,12 @@ function renderOverview() {
     ["Disk usage", fmtBytes(stats.db_bytes),
       stats.retention_days + "-day retention" + (stats.max_events ? " · cap " + fmtCompact(stats.max_events) : ""),
       "events database on disk, incl. WAL"],
-    ["Dropped", fmtCompact(stats.dropped), "lost to queue overflow", fmt(stats.dropped), stats.dropped > 0],
+    ["Dropped", fmtCompact(stats.dropped),
+      stats.rejected ? "queue overflow · " + fmtCompact(stats.rejected) + " rejected by source filter"
+                     : "lost to queue overflow",
+      fmt(stats.dropped) + " lost to queue overflow" +
+        (stats.rejected ? "; " + fmt(stats.rejected) + " datagrams discarded: sender not in SYSLOG_ALLOWED_SOURCES" : ""),
+      stats.dropped > 0 || stats.rejected > 0],
     ["Unparsed", fmtCompact(stats.unparsed), "kept for diagnosis", fmt(stats.unparsed) + " lines didn't match a known format", stats.unparsed > 0],
   ];
   $("tiles").innerHTML = tiles.map(([l,v,s,t,warn,cls]) =>

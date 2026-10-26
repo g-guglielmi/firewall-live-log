@@ -170,7 +170,10 @@ def main():
                AUTH_ENABLED="true", ADMIN_USERNAME=ADMIN_USER,
                ADMIN_PASSWORD=ADMIN_PASS,
                MAIL_DEBUG_DIR=os.path.join(tmp, "mail"),
-               PUBLIC_URL="https://fw.example.test")
+               PUBLIC_URL="https://fw.example.test",
+               # Every synthetic datagram comes from 127.0.0.1; a sender
+               # bound to 127.0.0.2 must be rejected (checked later).
+               SYSLOG_ALLOWED_SOURCES="127.0.0.1")
     # Don't inherit a real ADMIN_RESET / SMTP host from the caller's shell.
     for _k in ("ADMIN_RESET", "SMTP_HOST", "SMTP_FROM", "ADMIN_EMAIL"):
         env.pop(_k, None)
@@ -1028,6 +1031,73 @@ def main():
           len(e77.get("rule", "")) == 256 and e77.get("dst_port") == -1,
           f"len={len(e77.get('rule', ''))} port={e77.get('dst_port')}")
 
+    print("== hardening: syslog source filter, literal filters, csv paging ==")
+    # SYSLOG_ALLOWED_SOURCES=127.0.0.1: a datagram from 127.0.0.2 is discarded
+    # before parsing, counted as rejected, and logged once with the hint.
+    st_before = get_json("/api/stats")
+    rs2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rs2.bind(("127.0.0.2", 0))
+    for i in range(3):
+        rs2.sendto(unifi_line("WAN_IN-D-8800", "Should-Not-Land",
+                              "198.51.100.77", "10.0.10.5", "TCP", 22),
+                   ("127.0.0.1", P_UNIFI))
+    rs2.close()
+    time.sleep(2.5)
+    st_after = get_json("/api/stats")
+    check("datagrams from a non-allowed source are rejected (counted, not stored)",
+          st_after.get("rejected") == 3
+          and st_after["parsed"] == st_before["parsed"]
+          and st_after["unparsed"] == st_before["unparsed"],
+          f"rejected={st_after.get('rejected')} parsed {st_before['parsed']}"
+          f"->{st_after['parsed']}")
+    _, ev, _ = request("GET", "/api/events?window=3600&rule=Should-Not-Land")
+    check("rejected datagram never becomes an event", ev.get("events") == [])
+    check("rejected source is logged once with the SYSLOG_ALLOWED_SOURCES hint",
+          sum(1 for l in out if "rejected syslog from 127.0.0.2" in l
+              and "SYSLOG_ALLOWED_SOURCES" in l) == 1,
+          str([l for l in out if "rejected syslog" in l][:3]))
+    # An unparsed (firewall-shaped) line is stored truncated to 4 KB.
+    send(("SRC=not-an-ip DST=10.0.10.5 PROTO=TCP DPT=80 " + "J" * 9000).encode(),
+         P_UNIFI)
+    time.sleep(2.0)
+    with sqlite3.connect(f"file:{urllib.request.pathname2url(db_path)}?mode=ro",
+                         uri=True) as rdb:
+        raw_len = rdb.execute("SELECT length(raw) FROM unparsed "
+                              "ORDER BY id DESC LIMIT 1").fetchone()[0]
+    check("unparsed line stored truncated to 4096 bytes", raw_len == 4096,
+          str(raw_len))
+    # LIKE wildcards in a filter are literal: "%" and "_" match themselves.
+    send(unifi_line("LAN_IN-A-8801", "Pct_100%_done", "10.0.10.90",
+                    "10.0.10.5", "TCP", 443), P_UNIFI)
+    time.sleep(2.0)
+    _, ev, _ = request("GET", "/api/events?window=3600&device=UDM-Test&rule=100%25")
+    check("filter '100%' matches the literal rule only",
+          [e["rule"] for e in ev.get("events", [])] == ["Pct_100%_done"],
+          str([e["rule"] for e in ev.get("events", [])])[:120])
+    _, ev, _ = request("GET", "/api/events?window=3600&device=UDM-Test&rule=%25")
+    check("filter '%' is literal (not match-everything)",
+          len(ev.get("events", [])) == 1, str(len(ev.get("events", []))))
+    _, ev_all, _ = request("GET", "/api/events?window=3600&device=UDM-Test&limit=5000")
+    _, ev, _ = request("GET", "/api/events?window=3600&device=UDM-Test&rule=_")
+    check("filter '_' is literal (not any-character)",
+          0 < len(ev.get("events", [])) < len(ev_all.get("events", []))
+          and all("_" in e["rule"] for e in ev.get("events", [])),
+          f"{len(ev.get('events', []))} of {len(ev_all.get('events', []))}")
+    # CSV: limit honoured, header exactly once, row count = JSON count.
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=86400&limit=5"), timeout=10) as r:
+        lines = [l for l in r.read().decode().splitlines() if l]
+    check("csv limit=5 -> header + 5 rows", len(lines) == 6
+          and lines[0].startswith("time,") and
+          sum(1 for l in lines if l.startswith("time,")) == 1, str(len(lines)))
+    _, ev_all, _ = request("GET", "/api/events?window=86400&limit=5000")
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=86400"), timeout=10) as r:
+        lines = [l for l in r.read().decode().splitlines() if l]
+    check("csv row count equals the JSON window count",
+          len(lines) - 1 == len(ev_all.get("events", [])),
+          f"csv={len(lines) - 1} json={len(ev_all.get('events', []))}")
+
     print("== logout ==")
     code, _ = op2_json("/api/logout", None, csrf=v_csrf)
     check("logout succeeds (200)", code == 200, str(code))
@@ -1299,6 +1369,68 @@ def main():
     check("untrusted-forward warning table is capped",
           len(webmod._fwd_warned) <= webmod._FWD_WARN_MAX,
           str(len(webmod._fwd_warned)))
+    import listener as listenermod
+    srcs = webmod.parse_trusted_proxies("192.168.1.1, 10.0.0.0/24",
+                                        name="SYSLOG_ALLOWED_SOURCES")
+    check("syslog source filter: empty list accepts all, else exact/CIDR",
+          listenermod.source_allowed("8.8.8.8", ())
+          and listenermod.source_allowed("192.168.1.1", srcs)
+          and listenermod.source_allowed("10.0.0.77", srcs)
+          and not listenermod.source_allowed("10.0.1.1", srcs)
+          and not listenermod.source_allowed("garbage", srcs))
+    check("syslog source filter: v4-mapped IPv6 sender matches an IPv4 entry",
+          listenermod.source_allowed("::ffff:10.0.0.5", srcs)
+          and not listenermod.source_allowed("::ffff:10.0.1.5", srcs))
+    try:
+        webmod.parse_trusted_proxies("nope", name="SYSLOG_ALLOWED_SOURCES")
+        named = ""
+    except ValueError as e:
+        named = str(e)
+    check("bad SYSLOG_ALLOWED_SOURCES entry is reported under its own name",
+          named.startswith("SYSLOG_ALLOWED_SOURCES:"), named)
+    import store as storemod
+    odd_dir = os.path.join(tmp, "geo #1 100% odd")
+    os.makedirs(odd_dir, exist_ok=True)
+    odd_db = os.path.join(odd_dir, "events.db")
+    storemod.open_writer(odd_db).close()
+    try:
+        rdb = storemod.open_reader(odd_db)
+        odd_ok = rdb.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+        rdb.close()
+    except Exception as e:                           # noqa: BLE001
+        odd_ok = False
+        odd_err = str(e)
+    check("read-only SQLite URI works with '#', '%' and spaces in the path",
+          odd_ok, locals().get("odd_err", ""))
+    # CSV streaming: pages of CSV_PAGE rows, header once, lock released
+    # between pages (one query per page), limit honoured.
+    import io as iomod2
+    st_unit = webmod.AppState(db_path, [], None)
+    calls = {"n": 0}
+    real_query = st_unit.query
+
+    def counting_query(fn):
+        calls["n"] += 1
+        return real_query(fn)
+    st_unit.query = counting_query
+    with sqlite3.connect(f"file:{urllib.request.pathname2url(db_path)}?mode=ro",
+                         uri=True) as rdb:
+        total_ev = rdb.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    h = webmod.Handler.__new__(webmod.Handler)
+    h.state, h.command, h.wfile = st_unit, "GET", iomod2.BytesIO()
+    h.send_response = lambda code: None
+    h.send_header = lambda k, v: None
+    h.end_headers = lambda: None
+    h.CSV_PAGE = 7
+    h._stream_csv(0, None, {}, 50)
+    csv_lines = [l for l in h.wfile.getvalue().decode().splitlines() if l]
+    want = min(50, total_ev)
+    check("csv streaming: header once, rows = min(limit, total), paged queries",
+          len(csv_lines) == want + 1
+          and sum(1 for l in csv_lines if l.startswith("time,")) == 1
+          and calls["n"] >= (want + 6) // 7,
+          f"lines={len(csv_lines)} want={want} queries={calls['n']}")
+    st_unit._db.close() if st_unit._db else None
     try:
         webmod.parse_trusted_proxies("not-an-ip")
         bad = False
@@ -1334,6 +1466,13 @@ def main():
               if ep.chown_allowed(p)]
     check("entrypoint: system directories are never chowned", not denied,
           str(denied))
+    plan = ep.fixup_plan(lambda k, d: {"DB_PATH": "/mnt/vol/events.db",
+                                       "LAYOUT_PATH": ""}.get(k, d))
+    check("entrypoint: only the /data tree is chowned recursively; another "
+          "volume gets the dir + named files",
+          ("/data", True, ["/data/auth.db", "/data/devices.json"]) in plan
+          and ("/mnt/vol", False, ["/mnt/vol/events.db"]) in plan
+          and len(plan) == 2, str(plan))
     for bad, why in (({"PUID": "0"}, "root"), ({"PGID": "0"}, "root"),
                      ({"PUID": "abc"}, "numeric")):
         os.environ.update(bad)
@@ -1424,6 +1563,42 @@ def main():
     me = mailmod.from_env(lambda k, d=None: env_map.get(k, d))
     check("from_env parses SMTP_TLS_INSECURE and SMTP_DEBUG",
           me.tls_verify is False and me.debug is True)
+    # AUTH over a cleartext connection is refused unless explicitly allowed,
+    # and the AUTH exchange is never written to the SMTP debug log.
+    plain = mailmod.Mailer(host="h", sender="a@b.c", username="u",
+                           password="p", security="none")
+    saved_err2, sys.stderr = sys.stderr, iomod.StringIO()
+    try:
+        sent = plain.send("x@y.z", "s", "b")
+        err_txt = sys.stderr.getvalue()
+    finally:
+        sys.stderr = saved_err2
+    check("SMTP AUTH with SMTP_SECURITY=none is refused (send -> False)",
+          plain.plain_auth_blocked and sent is False
+          and "refusing SMTP AUTH" in err_txt, err_txt[:120])
+    check("SMTP_ALLOW_PLAINTEXT_AUTH=true lifts the refusal",
+          not mailmod.from_env(lambda k, d=None: {
+              "SMTP_HOST": "h", "SMTP_FROM": "a@b.c", "SMTP_USERNAME": "u",
+              "SMTP_SECURITY": "none",
+              "SMTP_ALLOW_PLAINTEXT_AUTH": "true"}.get(k, d)).plain_auth_blocked)
+
+    class _FakeSMTP:
+        def __init__(self):
+            self.debuglevel, self.seen = 1, []
+
+        def set_debuglevel(self, n):
+            self.debuglevel = n
+
+        def login(self, u, p):
+            self.seen.append(("login", self.debuglevel))
+
+        def send_message(self, m):
+            self.seen.append(("send", self.debuglevel))
+    fake = _FakeSMTP()
+    mailmod.Mailer(host="h", sender="a@b.c", username="u", password="p",
+                   security="starttls", debug=True)._auth_and_send(fake, None)
+    check("SMTP debug level is 0 during login() and restored afterwards",
+          fake.seen == [("login", 0), ("send", 1)], str(fake.seen))
 
     print("== live filter scan bound ==")
     import store as storemod
