@@ -693,9 +693,12 @@ completely open.
   likewise. The seeded `devices.json` stays `0644` so you can read and edit
   it from the host.
 - **Supply chain.** The base image is pinned by digest and every GitHub
-  Action by commit SHA (Dependabot proposes bumps); every release runs a
+  Action by commit SHA (Dependabot proposes bumps); the image build applies
+  Debian's security updates and removes `pip`/`setuptools` (nothing is
+  ever installed, so the installer and its vendored libraries are just
+  attack surface); every release runs a
   [Trivy](https://github.com/aquasecurity/trivy) scan of the exact image
-  about to ship and fails on a fixable CRITICAL/HIGH OS-package CVE; the
+  about to ship and fails on a fixable CRITICAL/HIGH CVE; the
   quarterly geo refresh verifies the `flag-icons` tarball against its
   pinned integrity hash and refuses any SVG containing scripts, event
   handlers or external references. CI workflows run with a read-only

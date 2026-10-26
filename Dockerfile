@@ -1,6 +1,6 @@
 # Pinned by digest (multi-arch index) so a build is reproducible and a
 # compromised or moved tag can't slip in; Dependabot opens a PR to bump it.
-FROM python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b
+FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
 
 LABEL org.opencontainers.image.source="https://github.com/g-guglielmi/firewall-live-log" \
       org.opencontainers.image.description="Multi-device (UniFi + Sophos) firewall syslog live dashboard" \
@@ -11,7 +11,17 @@ WORKDIR /app
 COPY app/ /app/
 COPY test_harness.py /app/
 
-RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin fll \
+# Nothing is ever pip-installed, so the installer and its vendored libraries
+# (certifi, urllib3, msgpack, setuptools, …) are pure attack surface — and the
+# thing the release-time Trivy scan would otherwise keep flagging. Debian's
+# security updates are applied at build time too, so a fix the pinned base
+# predates still ships (Dependabot bumps the digest afterwards).
+RUN apt-get update \
+    && apt-get -y --no-install-recommends upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip uninstall -y setuptools pip \
+    && rm -rf /root/.cache \
+    && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin fll \
     && mkdir -p /data && chown fll:fll /data
 
 # No USER directive: the entrypoint starts as root just long enough to chown
