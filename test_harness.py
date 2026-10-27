@@ -17,6 +17,7 @@ Exit code 0 = all checks pass.  Loopback only.
 import base64
 import email as emaillib
 import hashlib
+import http.client
 import http.cookiejar
 import importlib.util
 import json
@@ -606,6 +607,32 @@ def main():
                             "role": "user",
                             "email": "viewer1@example.test"}, csrf=True)
     check("admin creates a user (201)", code == 201, f"{code} {body}")
+    _, me_now, _ = request("GET", "/api/me")
+    my_id = me_now["user"]["id"]
+    code, body, _ = request("POST", "/api/users/set_email",
+                           {"id": my_id, "email": "admin@example.test"},
+                           csrf=True)
+    check("changing your own email without the current password -> 403",
+          code == 403 and "current password" in body.get("error", ""),
+          f"{code} {body}")
+    code, _, _ = request("POST", "/api/users/set_email",
+                        {"id": my_id, "email": "admin@example.test",
+                         "current_password": "Wrong-Password-1"}, csrf=True)
+    check("changing your own email with a wrong password -> 403", code == 403,
+          str(code))
+    code, _, _ = request("POST", "/api/users/set_email",
+                        {"id": my_id, "email": "admin@example.test",
+                         "current_password": ADMIN_PASS}, csrf=True)
+    _, me_now, _ = request("GET", "/api/me")
+    check("changing your own email with the current password -> 200 and "
+          "/api/me shows it",
+          code == 200 and me_now["user"]["email"] == "admin@example.test",
+          f"{code} {me_now}")
+    check("email unchanged after the refused attempts' failure was recorded "
+          "and cleared by the success (no lockout residue)",
+          request("POST", "/api/users/set_email",
+                  {"id": my_id, "email": "", "current_password": ADMIN_PASS},
+                  csrf=True)[0] == 200)
     code, _, _ = request("POST", "/api/users",
                         {"username": "viewer1", "password": "ViewerPass123"},
                         csrf=True)
@@ -1152,12 +1179,19 @@ def main():
                 parsed = emaillib.message_from_file(f)
             payload = parsed.get_payload(decode=True)     # decode QP/base64
             text = payload.decode("utf-8") if payload else ""
-            m = re.search(r"/reset\?token=([A-Za-z0-9_\-]+)", text)
+            m = re.search(r"/reset#token=([A-Za-z0-9_\-]+)", text)
             if m:
                 token = m.group(1)
                 break
         time.sleep(0.2)
-    check("reset email sent with a token link", token is not None)
+    check("reset email sent with the token in the URL fragment (#token=)",
+          token is not None and "/reset?token=" not in text)
+    reset_page = urllib.request.urlopen(BASE + "/reset", timeout=10) \
+        .read().decode()
+    check("reset page reads the fragment, still accepts the pre-v0.4.41 "
+          "query form, and scrubs the URL",
+          "location.hash" in reset_page and "location.search" in reset_page
+          and "history.replaceState" in reset_page)
     check("no email leaked for unknown identifier",
           len(mail_files()) == before + 1, str(len(mail_files())))
 
@@ -1851,6 +1885,111 @@ def main():
     time.sleep(3.5)
     gone = get_json("/api/live?since=0&ip=10.0.0.1")["events"]
     check("old event pruned by retention", gone == [], str(gone))
+
+    print("== HTTPS deployment: __Host- cookie + HSTS ==")
+    # A second instance with AUTH_FORCE_SECURE_COOKIE=true stands in for a
+    # TLS-terminating trusted proxy: the session cookie must be the
+    # __Host-session cookie (Secure, Path=/, no Domain), HSTS must be sent,
+    # a plain "session" cookie must be ignored, and logout must clear both.
+    tls_dir = os.path.join(tmp, "tls")
+    os.makedirs(tls_dir)
+    tls_cfg = os.path.join(tls_dir, "devices.json")
+    with open(tls_cfg, "w") as f:
+        json.dump({"retention_days": 1, "max_events": 0, "devices": [
+            {"name": "TLS-Test", "port": 15541, "vendor": "unifi"}]}, f)
+    e_tls = dict(env, DEVICES_CONFIG=tls_cfg, HTTP_PORT=str(HTTP_PORT + 1),
+                 DB_PATH=os.path.join(tls_dir, "events.db"),
+                 AUTH_DB_PATH=os.path.join(tls_dir, "auth.db"),
+                 AUTH_FORCE_SECURE_COOKIE="true")
+    pr_tls = subprocess.Popen([sys.executable, "-u", MAIN], env=e_tls,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True,
+                              creationflags=creationflags)
+    out_tls = []
+    threading.Thread(target=read_stdout, args=(pr_tls, out_tls),
+                     daemon=True).start()
+    up_tls = False
+    deadline = time.time() + 15
+    while time.time() < deadline and pr_tls.poll() is None:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT + 1}/healthz",
+                                   timeout=4).read()
+            up_tls = True
+            break
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(0.3)
+    check("forced-secure instance starts", up_tls, "\n".join(out_tls[:12]))
+
+    def raw(method, path, body=None, headers=None, port=HTTP_PORT + 1):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        hdrs = dict(headers or {})
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            hdrs["Content-Type"] = "application/json"
+        conn.request(method, path, data, hdrs)
+        resp = conn.getresponse()
+        payload = resp.read()
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except ValueError:
+            parsed = {}
+        hl = resp.getheaders()
+        conn.close()
+        return resp.status, parsed, hl
+
+    if up_tls:
+        st, lg, hl = raw("POST", "/api/login",
+                         {"username": ADMIN_USER, "password": ADMIN_PASS})
+        cookies = [v for k, v in hl if k.lower() == "set-cookie"]
+        hsts = [v for k, v in hl if k.lower() == "strict-transport-security"]
+        check("login over HTTPS sets __Host-session (Secure, Path=/, no "
+              "Domain) and only that cookie",
+              st == 200 and len(cookies) == 1
+              and cookies[0].startswith("__Host-session=")
+              and "Secure" in cookies[0] and "Path=/" in cookies[0]
+              and "HttpOnly" in cookies[0] and "SameSite=Strict" in cookies[0]
+              and "Domain" not in cookies[0], f"{st} {cookies}")
+        check("HSTS header is sent over HTTPS (one year, no subdomains)",
+              hsts == ["max-age=31536000"], str(hsts))
+        tok = cookies[0].split(";", 1)[0].split("=", 1)[1] if cookies else ""
+        st_ok, _, _ = raw("GET", "/api/me",
+                          headers={"Cookie": f"__Host-session={tok}"})
+        st_plain, _, _ = raw("GET", "/api/me",
+                             headers={"Cookie": f"session={tok}"})
+        check("the __Host- cookie authenticates; a plain 'session' cookie "
+              "with the same token is ignored over HTTPS",
+              st_ok == 200 and st_plain == 401, f"{st_ok} {st_plain}")
+        st, _, hl = raw("GET", "/healthz")
+        check("HSTS is on every response of the HTTPS instance (even public "
+              "ones)",
+              [v for k, v in hl if k.lower() == "strict-transport-security"]
+              == ["max-age=31536000"])
+        st, _, hl = raw("POST", "/api/logout",
+                        headers={"Cookie": f"__Host-session={tok}",
+                                 "X-CSRF-Token": lg.get("csrf_token", "")})
+        cleared = sorted(v.split("=", 1)[0] for k, v in hl
+                         if k.lower() == "set-cookie" and "Max-Age=0" in v)
+        check("logout clears both cookie names (old plain cookie too)",
+              st == 200 and cleared == ["__Host-session", "session"],
+              f"{st} {cleared}")
+        st, _, _ = raw("GET", "/api/me",
+                       headers={"Cookie": f"__Host-session={tok}"})
+        check("session is gone after logout", st == 401, str(st))
+    pr_tls.kill()
+    pr_tls.wait(timeout=10)
+    # The plain-HTTP main instance: cookie named "session", no HSTS, and a
+    # spoofed X-Forwarded-Proto from the untrusted peer changes nothing.
+    _, _, r = request("GET", "/api/me")
+    check("plain HTTP: no HSTS header, cookie is the plain 'session'",
+          r.headers.get("Strict-Transport-Security") is None
+          and any(c.name == "session" for c in _CJ)
+          and not any(c.name == "__Host-session" for c in _CJ))
+    _, _, r = request("GET", "/api/me",
+                      headers={"X-Forwarded-Proto": "https"})
+    check("plain HTTP: spoofed X-Forwarded-Proto from an untrusted peer does "
+          "not switch HSTS on",
+          r.headers.get("Strict-Transport-Security") is None)
 
     print("== graceful stop ==")
     # Queue a batch, then stop inside the flush window: final drain persists it.

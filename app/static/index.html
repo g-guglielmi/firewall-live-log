@@ -518,6 +518,21 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     </div>
   </div>
 </div>
+<div class="modal-back" id="emailModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="emailTitle">
+    <h3 id="emailTitle">Your email</h3>
+    <div class="sub">Used for self-service password reset. Leave blank to clear it. Your current password is required, because this is where reset links go.</div>
+    <label for="emAddr">Email address</label>
+    <input id="emAddr" type="email" maxlength="254" autocomplete="email">
+    <label for="emCur">Current password</label>
+    <input id="emCur" type="password" autocomplete="current-password" maxlength="1024">
+    <div class="msg" id="emMsg"></div>
+    <div class="actions">
+      <button id="emCancel">Cancel</button>
+      <button class="primary" id="emSave">Save</button>
+    </div>
+  </div>
+</div>
 
 <!-- User-management modal (admin) -->
 <div class="modal-back" id="usersModal">
@@ -821,16 +836,25 @@ function trapTab(e) {
   else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
   else if (!$(t).contains(cur)) { e.preventDefault(); first.focus(); }
 }
-async function setMyEmail() {
-  const email = await promptDialog("Your email", "Used for self-service password reset. Leave blank to clear it.",
-    "Email address", me && me.email ? me.email : "", "email");
-  if (email === null) return;
-  const res = await apiSend("POST", "/api/users/set_email",
-    { id: me.id, email: email.trim() });
-  if (gone(res)) return;
-  const data = await res.json();
-  if (!res.ok) { showError(new Error(data.error || "Could not update email.")); return; }
-  loadMe();
+function setMyEmail() {
+  $("emAddr").value = me && me.email ? me.email : "";
+  $("emCur").value = "";
+  modalMsg("emMsg", "");
+  openModal("emailModal", $("emAddr"));
+}
+async function saveMyEmail() {
+  const email = $("emAddr").value.trim(), cur = $("emCur").value;
+  if (!cur) return modalMsg("emMsg", "Enter your current password.");
+  try {
+    const res = await apiSend("POST", "/api/users/set_email",
+      { id: me.id, email, current_password: cur });
+    if (gone(res)) return;
+    const data = await res.json();
+    if (!res.ok) return modalMsg("emMsg", data.error || "Could not update email.");
+    closeModal("emailModal");
+    loadMe();
+    if (typeof refreshUsers === "function" && $("usersModal").classList.contains("open")) refreshUsers();
+  } catch (e) { modalMsg("emMsg", "Network error."); }
 }
 
 let view = "overview";      // "overview" or a device name
@@ -1698,6 +1722,9 @@ document.addEventListener("keydown", (e) => {
   }
 });
 $("emailBtn").addEventListener("click", setMyEmail);
+$("emCancel").addEventListener("click", () => closeModal("emailModal"));
+$("emSave").addEventListener("click", saveMyEmail);
+$("emCur").addEventListener("keydown", e => { if (e.key === "Enter") saveMyEmail(); });
 $("pwBtn").addEventListener("click", () => openPw(false));
 $("pwCancel").addEventListener("click", closePw);
 $("pwSave").addEventListener("click", async () => {
@@ -1761,6 +1788,7 @@ async function setRole(id, role, name) {
   refreshUsers();
 }
 async function editEmail(id, current, name) {
+  if (me && Number(id) === me.id) return setMyEmail();
   const email = await promptDialog(`Email for ${name}`, "Needed for self-service password reset. Leave blank to clear it.",
     "Email address", current || "", "email");
   if (email === null) return;

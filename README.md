@@ -277,7 +277,7 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
-| `AUTH_FORCE_SECURE_COOKIE` | `false` | Force the `Secure` flag on the session cookie. Otherwise it is set automatically when a **trusted** proxy sends `X-Forwarded-Proto: https`. |
+| `AUTH_FORCE_SECURE_COOKIE` | `false` | Treat every request as HTTPS: `__Host-` session cookie with the `Secure` flag, plus the HSTS header. Otherwise that happens automatically when a **trusted** proxy sends `X-Forwarded-Proto: https`. Never set it on a plain-HTTP deployment (browsers would refuse the cookie). |
 | `TRUSTED_PROXIES` | _(none)_ | Comma-separated IPs/CIDRs of your reverse proxy (e.g. `172.17.0.1` or `192.168.1.10`). Only from these peers are `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` believed — for per-client lockouts, the automatic `Secure` cookie flag, and the cross-site check. From anyone else they are ignored (logged once per peer) and the real address is used. Direct access from the LAN needs nothing here. |
 | `SESSION_TTL_HOURS` | `12` | Absolute maximum session lifetime (hours). |
 | `SESSION_IDLE_MINUTES` | `0` | Idle timeout in minutes (`0` = disabled); expires a session this long after the last user activity, capped by `SESSION_TTL_HOURS`. |
@@ -550,8 +550,9 @@ yourself out.
 
 Each account can have an **email** attached (set it when creating the user,
 per-row in the Users panel, or via the **Set email** item in the account
-menu for your own account). An email is what enables self-service password
-reset, below.
+menu for your own account — that one asks for your current password,
+since the address is where reset links go). An email is what enables
+self-service password reset, below.
 
 Passwords must be at least 12 characters.
 
@@ -616,10 +617,23 @@ to wipe all accounts and start over.
 ### How sign-in is protected
 
 - **Sessions** are random tokens set as an `HttpOnly`, `SameSite=Strict`
-  cookie; only a hash of the token is stored server-side. The cookie gets
-  the `Secure` flag automatically when a *trusted* proxy (see
-  `TRUSTED_PROXIES`) sends `X-Forwarded-Proto: https`; force it with
-  `AUTH_FORCE_SECURE_COOKIE=true`.
+  cookie; only a hash of the token is stored server-side. Over HTTPS —
+  a *trusted* proxy (see `TRUSTED_PROXIES`) sending
+  `X-Forwarded-Proto: https`, or `AUTH_FORCE_SECURE_COOKIE=true` — the
+  cookie is named `__Host-session` with the `Secure` flag, so a browser
+  only accepts it host-only over HTTPS and a sibling host or a
+  plain-HTTP page can't plant or shadow it; a plain `session` cookie is
+  ignored there. Responses then also carry
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`;
+  add that at the proxy if you want it). A plain-HTTP deployment keeps
+  the `session` cookie and sends no HSTS.
+- **Reset links** carry the token in the URL fragment
+  (`/reset#token=…`), which the browser never sends to the server, so it
+  can't show up in proxy or access logs or a `Referer`; the page scrubs
+  it from the address bar once read. Links in the older `?token=` form
+  still work. Changing your **own email** requires your current
+  password (throttled like a login), so a hijacked session can't
+  redirect reset links.
 - **Reverse-proxy headers are only trusted from your proxy.**
   `X-Forwarded-For` and friends are ordinary request headers anyone can
   send, so they are honoured only when the TCP peer is listed in

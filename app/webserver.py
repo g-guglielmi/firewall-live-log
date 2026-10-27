@@ -86,7 +86,15 @@ def client_ip_from(peer, xff, trusted):
 _fwd_warn_lock = threading.Lock()
 _fwd_warned = {}                      # peer -> last warning time (monotonic)
 _FWD_WARN_INTERVAL = 3600
-_FWD_WARN_MAX = 4096                  # bound the table: peers are attacker-chosen
+_FWD_WARN_MAX = 4096
+
+# Session cookie names: __Host- over HTTPS (see _set_session_cookie), the
+# plain name over HTTP. HSTS: one year, no includeSubDomains (the dashboard's
+# host may have siblings the operator serves over HTTP; they can opt in at
+# their proxy).
+HOST_COOKIE = "__Host-session"
+PLAIN_COOKIE = "session"
+HSTS_MAX_AGE = 31536000                  # bound the table: peers are attacker-chosen
 
 
 def warn_untrusted_forward(peer, header):
@@ -395,6 +403,11 @@ class Handler(BaseHTTPRequestHandler):
             "Cross-Origin-Opener-Policy": "same-origin",
             "Cross-Origin-Resource-Policy": "same-origin",
         }
+        if self._https():
+            # Only when we know the client reached us over HTTPS (trusted
+            # proxy said so, or the operator forced it): a plain-HTTP
+            # deployment must never pin browsers to a scheme it can't serve.
+            h["Strict-Transport-Security"] = f"max-age={HSTS_MAX_AGE}"
         if nonce is not None:
             h["Content-Security-Policy"] = (
                 "default-src 'none'; "
@@ -419,7 +432,8 @@ class Handler(BaseHTTPRequestHandler):
         if "Cache-Control" not in headers:
             self.send_header("Cache-Control", "no-store")
         for k, v in headers.items():
-            self.send_header(k, v)
+            for one in (v if isinstance(v, (list, tuple)) else (v,)):
+                self.send_header(k, one)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -512,7 +526,11 @@ class Handler(BaseHTTPRequestHandler):
             jar.load(raw)
         except http.cookies.CookieError:
             return None
-        c = jar.get("session")
+        # Over HTTPS only the __Host- cookie counts: a plain "session"
+        # cookie there could have been planted from an HTTP sibling host
+        # (login CSRF / fixation), which is exactly what the prefix is for.
+        # One re-login after the upgrade for HTTPS deployments.
+        c = jar.get(HOST_COOKIE if self._https() else PLAIN_COOKIE)
         return c.value if c else None
 
     def current_user(self):
@@ -538,16 +556,37 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return self.auth.verify_api_key(hdr[7:].strip(), self._client_ip())
 
-    def _cookie_secure(self):
+    def _https(self):
+        """True when the request is known to have arrived over HTTPS: the
+        operator forced it, or a *trusted* proxy sent X-Forwarded-Proto."""
+        if self.force_secure_cookie:
+            return True
+        if getattr(self, "headers", None) is None:
+            return False
         proto = self._forwarded("X-Forwarded-Proto") or ""
-        return self.force_secure_cookie or proto.lower() == "https"
+        return proto.lower() == "https"
+
+    @staticmethod
+    def _cookie(name, token, max_age, secure):
+        parts = [f"{name}={token}", "Path=/", "HttpOnly", "SameSite=Strict",
+                 f"Max-Age={max_age}"]
+        if secure:
+            parts.append("Secure")
+        return "; ".join(parts)
 
     def _set_session_cookie(self, token, max_age):
-        parts = [f"session={token}", "Path=/", "HttpOnly", "SameSite=Strict",
-                 f"Max-Age={max_age}"]
-        if self._cookie_secure():
-            parts.append("Secure")
-        return {"Set-Cookie": "; ".join(parts)}
+        """Over HTTPS the session cookie is ``__Host-session``: the browser
+        then refuses it unless it is Secure, host-only and Path=/, so a
+        sibling host (or an attacker on plain HTTP for the same name) can't
+        plant or shadow it. Over plain HTTP the name stays ``session``.
+        Clearing (max_age 0) clears both names, so a logout after a switch
+        to HTTPS removes the old cookie too."""
+        secure = self._https()
+        name = HOST_COOKIE if secure else PLAIN_COOKIE
+        if max_age == 0:
+            return {"Set-Cookie": [self._cookie(HOST_COOKIE, "", 0, True),
+                                   self._cookie(PLAIN_COOKIE, "", 0, secure)]}
+        return {"Set-Cookie": self._cookie(name, token, max_age, secure)}
 
     def _read_json_body(self):
         try:
@@ -939,6 +978,16 @@ class Handler(BaseHTTPRequestHandler):
         if target != user["id"] and user["role"] != "admin":
             self._json({"error": "admin required"}, 403)
             return
+        if target == user["id"]:
+            # The email is where a reset link goes, so a hijacked session
+            # must not be able to point it elsewhere without the password.
+            # Throttled + lockout-aware like a login (AuthError 429).
+            current = body.get("current_password", "")
+            if not isinstance(current, str) or not \
+                    self.auth.verify_current_password(user["id"], current,
+                                                      self._client_ip()):
+                self._json({"error": "current password is incorrect"}, 403)
+                return
         self.auth.set_email(target, body.get("email"))
         self._json({"ok": True})
 
@@ -1067,7 +1116,9 @@ class Handler(BaseHTTPRequestHandler):
                       flush=True)
                 return
             token = self.auth.create_reset_token(u["id"], ip)
-            url = f"{self.public_url}/reset?token={token}"
+            # Fragment, not query: the browser never sends it to the
+            # server, so it can't land in proxy/access logs or a Referer.
+            url = f"{self.public_url}/reset#token={token}"
             ok = self.mailer.send(
                 u["email"], "Reset your firewall-live-log password",
                 mailer_mod.reset_email_body(
