@@ -15,8 +15,12 @@ Configuration:
   TRUSTED_PROXIES  reverse-proxy IPs/CIDRs whose X-Forwarded-* headers
                    are believed (default: none)
   SYSLOG_BIND      address the collector ports listen on (default 0.0.0.0)
-  SYSLOG_ALLOWED_SOURCES  firewall IPs/CIDRs allowed to send syslog;
-                   anything else is discarded (default: accept all)
+  SYSLOG_ALLOWED_SOURCES  firewall IPs/CIDRs/hostnames allowed to send
+                   syslog; anything else is discarded (default: accept
+                   all). Hostnames (e.g. a remote site's DDNS name) are
+                   re-resolved hourly and after a rejected datagram, and
+                   datagrams from a not-yet-allowed address are held up
+                   to 10 minutes for replay.
   RETENTION_DAYS   overrides config value    (default 14)
   MAX_EVENTS       row-count safety cap, 0=off (overrides config)
   PRUNE_INTERVAL_SEC  retention sweep period (default 3600)
@@ -40,6 +44,7 @@ import config
 import layout as layout_mod
 import listener
 import mailer as mailer_mod
+import sources as sources_mod
 import store
 import webserver
 import writer
@@ -240,15 +245,21 @@ def main():
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
     try:
         trusted_proxies = webserver.parse_trusted_proxies(env("TRUSTED_PROXIES"))
-        syslog_sources = webserver.parse_trusted_proxies(
-            env("SYSLOG_ALLOWED_SOURCES"), name="SYSLOG_ALLOWED_SOURCES")
+        src_nets, src_hosts = sources_mod.parse(env("SYSLOG_ALLOWED_SOURCES"))
     except ValueError as e:
         print(f"[web] {e}", file=sys.stderr)
         sys.exit(2)
+    syslog_sources = sources_mod.SourceFilter(src_nets, src_hosts)
     syslog_bind = env("SYSLOG_BIND", "0.0.0.0")
-    if syslog_sources:
+    if syslog_sources.enabled:
         print("[listener] syslog accepted only from: "
-              + ", ".join(str(n) for n in syslog_sources))
+              + syslog_sources.describe())
+        if src_hosts:
+            print(f"[listener] {len(src_hosts)} hostname(s): re-resolved "
+                  f"every {sources_mod.RESOLVE_INTERVAL // 60} min and after "
+                  "a rejected datagram; syslog from an address not (yet) "
+                  f"allowed is held up to {listener.HELD_TTL // 60} min for "
+                  "replay")
     else:
         print("[listener] SYSLOG_ALLOWED_SOURCES not set — syslog is accepted "
               "from any address that can reach the collector ports",
@@ -314,6 +325,9 @@ def main():
         args=(stop_event, db_path, q, drops, cfg, prune_interval))
     writer_thread.start()
 
+    # Hostname resolver before the listeners, so the first round is already
+    # under way when the first datagram arrives (held meanwhile if needed).
+    syslog_sources.start(stop_event)
     listener_threads = []
     for device in cfg.devices:
         t = threading.Thread(target=listener.run, name=f"listen-{device.name}",

@@ -21,6 +21,7 @@ import http.cookiejar
 import importlib.util
 import json
 import os
+import queue
 import re
 import signal
 import socket
@@ -172,8 +173,9 @@ def main():
                MAIL_DEBUG_DIR=os.path.join(tmp, "mail"),
                PUBLIC_URL="https://fw.example.test",
                # Every synthetic datagram comes from 127.0.0.1; a sender
-               # bound to 127.0.0.2 must be rejected (checked later).
-               SYSLOG_ALLOWED_SOURCES="127.0.0.1")
+               # bound to 127.0.0.2 must be rejected (checked later). A
+               # hostname, so the run exercises DNS-backed entries.
+               SYSLOG_ALLOWED_SOURCES="localhost")
     # Don't inherit a real ADMIN_RESET / SMTP host from the caller's shell.
     for _k in ("ADMIN_RESET", "SMTP_HOST", "SMTP_FROM", "ADMIN_EMAIL"):
         env.pop(_k, None)
@@ -200,6 +202,17 @@ def main():
     if not up:
         proc.kill()
         sys.exit(1)
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(
+            "[sources] resolved localhost ->" in l for l in out):
+        time.sleep(0.1)
+    check("hostname in SYSLOG_ALLOWED_SOURCES is resolved at startup",
+          any("[sources] resolved localhost ->" in l and "127.0.0.1" in l
+              for l in out),
+          str([l for l in out if "[sources]" in l][:3]))
+    check("startup log names the hostname and the hold/replay behaviour",
+          any("syslog accepted only from: localhost" in l for l in out)
+          and any("held up to 10 min for replay" in l for l in out))
     if os.name != "nt":
         import stat as statmod
         modes = {os.path.basename(p): oct(statmod.S_IMODE(os.stat(p).st_mode))
@@ -1381,13 +1394,189 @@ def main():
     check("syslog source filter: v4-mapped IPv6 sender matches an IPv4 entry",
           listenermod.source_allowed("::ffff:10.0.0.5", srcs)
           and not listenermod.source_allowed("::ffff:10.0.1.5", srcs))
-    try:
-        webmod.parse_trusted_proxies("nope", name="SYSLOG_ALLOWED_SOURCES")
-        named = ""
-    except ValueError as e:
-        named = str(e)
-    check("bad SYSLOG_ALLOWED_SOURCES entry is reported under its own name",
-          named.startswith("SYSLOG_ALLOWED_SOURCES:"), named)
+    import sources as sourcesmod
+    bad = {}
+    for entry in ("10.0.0.300", "10.0.0.0/33", "bad host!", "a..b", "::g"):
+        try:
+            sourcesmod.parse(entry)
+            bad[entry] = ""
+        except ValueError as e:
+            bad[entry] = str(e)
+    check("bad SYSLOG_ALLOWED_SOURCES entries (typo'd IPs, odd names) are "
+          "refused under the setting's name",
+          all(v.startswith("SYSLOG_ALLOWED_SOURCES:") for v in bad.values()),
+          str(bad))
+    p_nets, p_hosts = sourcesmod.parse(
+        " 192.168.1.1, Site-B.Example.NET., 10.0.0.0/24, site-b.example.net,"
+        " none, localhost ")
+    check("SYSLOG_ALLOWED_SOURCES mixes IPs, CIDRs and hostnames "
+          "(lower-cased, deduplicated, trailing dot dropped)",
+          [str(n) for n in p_nets] == ["192.168.1.1/32", "10.0.0.0/24"]
+          and p_hosts == ("site-b.example.net", "localhost"),
+          f"{p_nets} {p_hosts}")
+    check("sources.parse: empty and 'none' mean no filter",
+          sourcesmod.parse("") == ((), ())
+          and sourcesmod.parse("none") == ((), ()))
+
+    # SourceFilter with a scripted resolver: hostnames resolve to a set that
+    # can change; failures keep the last known addresses; `generation`
+    # moves only when the allowed set actually changes.
+    import ipaddress as ipmod
+    answers = {"site-b.example.net": {"203.0.113.7"}}
+
+    def fake_resolver(host):
+        a = answers.get(host)
+        if a is None:
+            raise socket.gaierror(-2, "Name or service not known")
+        return frozenset(ipmod.ip_address(x) for x in a)
+
+    sf = sourcesmod.SourceFilter(p_nets, ("site-b.example.net", "site-c.test"),
+                                 resolver=fake_resolver)
+    check("hostname not resolved yet: its sender is NOT allowed, literal "
+          "entries still are, nobody at all when only hostnames are "
+          "configured, everybody when nothing is",
+          not sf.allows("203.0.113.7") and sf.allows("10.0.0.9")
+          and not sourcesmod.SourceFilter(
+              (), ("x.test",), resolver=fake_resolver).allows("8.8.8.8")
+          and sourcesmod.SourceFilter().allows("8.8.8.8"))
+    g0 = sf.generation
+    ch1 = sf.resolve_all()
+    check("first resolution round allows the resolved address and bumps "
+          "generation; the failing name is tolerated",
+          ch1 and sf.generation == g0 + 1 and sf.allows("203.0.113.7")
+          and sf.host_for("203.0.113.7") == "site-b.example.net"
+          and sf.host_for("10.0.0.9") is None and sf._failures == 1)
+    ch2 = sf.resolve_all()
+    check("unchanged answers: no generation bump",
+          not ch2 and sf.generation == g0 + 1)
+    answers["site-b.example.net"] = {"203.0.113.9", "2001:db8::9"}
+    answers["site-c.test"] = {"198.51.100.4"}
+    sf.resolve_all()
+    check("IP change: new addresses (v4 + v6) allowed, old one no longer, "
+          "second name now resolved and failure streak reset",
+          sf.allows("203.0.113.9") and sf.allows("2001:db8::9")
+          and not sf.allows("203.0.113.7") and sf.allows("198.51.100.4")
+          and sf.generation == g0 + 2 and sf._failures == 0
+          and sf.allows("::ffff:198.51.100.4"))
+    del answers["site-b.example.net"]
+    sf.resolve_all()
+    check("DNS failure keeps the last known addresses (never locks a site out)",
+          sf.allows("203.0.113.9") and sf.generation == g0 + 2
+          and sf._failures == 1)
+    sf._failures = 1
+    b1 = sf._next_interval()
+    sf._failures = 4
+    b4 = sf._next_interval()
+    sf._failures = 20
+    b20 = sf._next_interval()
+    sf._failures = 0
+    b0 = sf._next_interval()
+    check("retry backoff: 60 s doubling per failed round, capped at the "
+          "hourly interval",
+          (b1, b4, b20, b0) == (60, 480, 3600, 3600), str((b1, b4, b20, b0)))
+
+    # Resolver thread: a trigger re-resolves after the minimum gap, several
+    # triggers inside the gap collapse into one round, idle = baseline.
+    answers["site-b.example.net"] = {"203.0.113.9"}
+    sf2 = sourcesmod.SourceFilter((), ("site-b.example.net",),
+                                  resolver=fake_resolver)
+    sf2.interval = 30
+    sf2.min_gap = 0.4
+    stop2 = threading.Event()
+    sf2.start(stop2)
+    time.sleep(0.2)
+    r1 = sf2.rounds
+    for i in range(5):
+        sf2.trigger()
+    time.sleep(0.9)
+    r2 = sf2.rounds
+    sf2.trigger()
+    time.sleep(0.9)
+    r3 = sf2.rounds
+    stop2.set()
+    check("resolver thread: initial round, then one round per trigger "
+          "after the gap (5 rapid triggers collapse into one)",
+          (r1, r2, r3) == (1, 2, 3), str((r1, r2, r3)))
+    check("trigger/start on a filter without hostnames are no-ops",
+          sourcesmod.SourceFilter(p_nets).trigger() is None
+          and sourcesmod.SourceFilter(p_nets).start(stop2) is None)
+
+    # Listener hold/replay, end to end on a private port: datagrams from an
+    # address that is not allowed are held; when the resolver's answer
+    # changes to include that address they are replayed with their original
+    # timestamps, and the rejected counter is corrected.
+    import listener as listenermod
+    import config as configmod
+    answers["site-b.example.net"] = {"127.0.0.1"}
+    sf3 = sourcesmod.SourceFilter((), ("site-b.example.net",),
+                                  resolver=fake_resolver)
+    sf3.resolve_all()
+    dev3 = configmod.Device("Held-Test", 15531, "unifi")
+    q3 = queue.Queue()
+    drops3 = {"n": 0, "ignored": 0, "rejected": 0, "lock": threading.Lock()}
+    stop3 = threading.Event()
+    threading.Thread(target=listenermod.run,
+                     args=(stop3, dev3, q3, drops3, sf3, "127.0.0.1"),
+                     daemon=True).start()
+    time.sleep(0.5)
+    rs3 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rs3.bind(("127.0.0.2", 0))
+    t_sent = int(time.time())
+    for i in range(3):
+        rs3.sendto(unifi_line("WAN_IN-D-8900", f"Held-{i}", "198.51.100.77",
+                              "10.0.10.5", "TCP", 22 + i),
+                   ("127.0.0.1", 15531))
+    rs3.sendto(b"<14>Oct 27 00:00:00 gw dhcpd: lease 10.0.0.9 renewed",
+               ("127.0.0.1", 15531))          # held too, ignored on replay
+    rs3.close()
+    time.sleep(0.6)
+    held_state = (drops3["rejected"], q3.qsize(), sf3._kicked)
+    check("datagrams from a not-yet-allowed sender are rejected, held and "
+          "trigger a re-resolution",
+          held_state == (4, 0, True), str(held_state))
+    time.sleep(1.1)
+    answers["site-b.example.net"] = {"127.0.0.1", "127.0.0.2"}
+    sf3.resolve_all()
+    deadline = time.time() + 4
+    while time.time() < deadline and q3.qsize() < 3:
+        time.sleep(0.1)
+    items3 = [q3.get_nowait() for _ in range(q3.qsize())]
+    check("after the sender becomes allowed the held datagrams are replayed "
+          "in order with their original timestamps; host chatter is ignored",
+          [it[9] for it in items3] == ["Held-0", "Held-1", "Held-2"]
+          and all(it[0] == "ev" and t_sent <= it[1] <= t_sent + 1
+                  for it in items3)
+          and drops3["rejected"] == 0 and drops3["ignored"] == 1,
+          f"{[(it[0], it[1], it[-1]) for it in items3]} {drops3}")
+    rs3 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rs3.bind(("127.0.0.2", 0))
+    rs3.sendto(unifi_line("WAN_IN-A-8901", "Now-Direct", "198.51.100.77",
+                          "10.0.10.5", "TCP", 443), ("127.0.0.1", 15531))
+    rs3.close()
+    time.sleep(0.6)
+    check("the newly allowed sender's later datagrams go straight through",
+          q3.qsize() == 1 and q3.get_nowait()[9] == "Now-Direct"
+          and drops3["rejected"] == 0)
+    stop3.set()
+    # Hold buffer bounds: per-datagram size, count, and age.
+    hb = listenermod._Held()
+    hb.add(1000, "10.9.9.9", b"x" * 9000)
+    for i in range(listenermod.HELD_MAX + 10):
+        hb.add(1000 + i // 1000, "10.9.9.9", b"y")
+    check("held datagrams are truncated to 4 KB and the buffer keeps the "
+          "newest HELD_MAX",
+          len(hb.items) == listenermod.HELD_MAX
+          and all(len(it[2]) <= listenermod.MAX_RAW_LEN for it in hb.items))
+    hb2 = listenermod._Held()
+    hb2.add(1000, "10.9.9.9", b"old")
+    hb2.add(1000 + listenermod.HELD_TTL + 1, "10.9.9.8", b"new")
+    rel = hb2.release(1000 + listenermod.HELD_TTL + 1,
+                      sourcesmod.SourceFilter())
+    check("a held datagram older than HELD_TTL is discarded, not replayed",
+          [it[2] for it in rel] == [b"new"], str(rel))
+    check("reject log mentions the hold only when hostnames are configured",
+          listenermod._RejectLog("d", held=True).held
+          and not listenermod._RejectLog("d").held)
     import store as storemod
     odd_dir = os.path.join(tmp, "geo #1 100% odd")
     os.makedirs(odd_dir, exist_ok=True)

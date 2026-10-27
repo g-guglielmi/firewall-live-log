@@ -265,7 +265,7 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `DB_PATH` | `/data/events.db` | SQLite file (on the bind mount). |
 | `LAYOUT_PATH` | `<db dir>/layout.json` | Overview grouping/order (admin-managed via the GUI). |
 | `HTTP_PORT` / `HTTP_BIND` | `8080` / `0.0.0.0` | Dashboard/API. |
-| `SYSLOG_ALLOWED_SOURCES` | _(accept all)_ | Comma-separated IPs/CIDRs of your firewalls (e.g. `192.168.1.1, 10.0.0.0/24`). When set, a syslog datagram from any other address is discarded before it is parsed (counted as *rejected*, logged once per source per hour). Strongly recommended: syslog is unauthenticated. |
+| `SYSLOG_ALLOWED_SOURCES` | _(accept all)_ | Comma-separated IPs, CIDRs and hostnames of your firewalls (e.g. `192.168.1.1, 10.0.0.0/24, site-b.duckdns.org`). When set, a syslog datagram from any other address is discarded before it is parsed (counted as *rejected*, logged once per source per hour). Hostnames are re-resolved hourly and after a rejected datagram, and datagrams from a not-yet-allowed address are held up to 10 minutes for replay — see [Remote sites with dynamic IPs](#remote-sites-with-dynamic-ips). Strongly recommended: syslog is unauthenticated. |
 | `SYSLOG_BIND` | `0.0.0.0` | Address the collector UDP ports listen on inside the container (`::` for IPv6 + IPv4). |
 | `RETENTION_DAYS` | `14` | Overrides the config value. |
 | `MAX_EVENTS` | `0` | Row-count cap (0 = off); overrides config. |
@@ -321,6 +321,44 @@ kept. Consequently **Unparsed** now means only *"a firewall-shaped line a
 parser couldn't handle"* — a genuine parser gap worth reporting — and should
 sit at or near zero. Unparsed rows also age out on `RETENTION_DAYS` (with a
 10,000-row cap as a backstop).
+
+### Remote sites with dynamic IPs
+
+A firewall at another site that sends syslog over the internet arrives
+from that site's **public** address (its own NAT stamps it on the
+datagram), so that is what belongs in `SYSLOG_ALLOWED_SOURCES`. When the
+address is dynamic, list the site's **dynamic-DNS hostname** instead:
+
+```
+SYSLOG_ALLOWED_SOURCES=192.168.1.1, site-b.duckdns.org, site-c.dyndns.org
+```
+
+- Every hostname is resolved (A and AAAA) by a background thread: once
+  an hour as a baseline, and **right away when a datagram is rejected**
+  — a site whose address just changed shows up as rejects from an
+  unknown address — at most once a minute, so a port scanner can't drive
+  DNS traffic. While a name fails to resolve it is retried from 60 s,
+  doubling up to the hourly interval.
+- A failed lookup **keeps the last known addresses**: a DNS hiccup never
+  locks a site out. A name that has never resolved allows nobody (the
+  literal entries still work); the failure is logged once an hour.
+- UDP has no retransmission, so the datagrams sent between the address
+  change and the DNS update would normally be lost. Instead, while
+  hostnames are configured, a rejected datagram is **held for up to 10
+  minutes** (at most 5,000 per device, 4 KB each, oldest out first) and
+  **replayed with its original timestamp** as soon as its sender becomes
+  allowed. The log shows `resolved <host> -> <addresses>` on every
+  change and `accepted N held datagram(s) from <ip> (now allowed via
+  <host>)` after a replay; the *rejected* count is corrected.
+- The remaining gap is the remote router's DDNS client: how quickly it
+  publishes the new address. The DDNS update must be made by something
+  that sees the public IP (normally the firewall itself).
+
+The allow-list only keeps strays and scanners out of the database: UDP
+source addresses are trivially spoofed, so it is **not authentication**.
+For remote sites a WireGuard/IPsec tunnel with the tunnel addresses in
+the list is the solid answer; the hostname support is for when a tunnel
+isn't an option.
 
 ## API
 
@@ -665,10 +703,13 @@ completely open.
   bind-mounted data directory accordingly.
 - **Syslog is unauthenticated UDP**: anything that can reach a collector
   port can write rows. **Set `SYSLOG_ALLOWED_SOURCES` to your firewalls'
-  addresses** — a datagram from anyone else is discarded before it is even
-  decoded (the *Dropped* tile shows a *rejected* count, and each source is
-  logged once an hour) — and keep the ports reachable only from them anyway
-  (host firewall rule or a management VLAN). The parser validates every
+  addresses** (IPs, CIDRs, or a remote site's DDNS hostname — see
+  [Remote sites with dynamic IPs](#remote-sites-with-dynamic-ips)) — a
+  datagram from anyone else is discarded before it is even decoded (the
+  *Dropped* tile shows a *rejected* count, and each source is logged
+  once an hour) — and keep the ports reachable only from them anyway
+  (host firewall rule or a management VLAN). Source addresses can be
+  spoofed, so the list is a filter, not authentication. The parser validates every
   field at the edge — source/destination must be real IP addresses, rule
   text is capped at 256 characters, ports at 0-65535 — a line that fails
   goes to the *Unparsed* counter instead of the table, and an unparsed line
