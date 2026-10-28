@@ -1382,6 +1382,29 @@ def main():
     check("IPv6 addresses still parse",
           parsersmod.parse_unifi(
               "SRC=2001:db8::1 DST=2001:db8::2 PROTO=TCP DPT=443") is not None)
+    # Protocol numbers the firewall leaves raw are named; unknown ones stay.
+    pn = lambda line: parsersmod.parse_unifi(line)[2]
+    check("unifi PROTO=2 -> IGMP, 47 -> GRE, 58 -> ICMPV6, tcp -> TCP",
+          [pn(f"SRC=10.0.0.1 DST=224.0.0.1 PROTO={p}") for p in
+           ("2", "47", "58", "tcp")] == ["IGMP", "GRE", "ICMPV6", "TCP"])
+    check("unifi unknown protocol number is kept as-is",
+          pn("SRC=10.0.0.1 DST=10.0.0.2 PROTO=253") == "253")
+    check("sophos protocol=\"2\" -> IGMP",
+          parsersmod.parse_sophos(
+              'src_ip=10.0.0.1 dst_ip=224.0.0.1 protocol="2"')[2] == "IGMP")
+    check("proto_alias maps both ways and None otherwise",
+          (parsersmod.proto_alias("2"), parsersmod.proto_alias("igmp"),
+           parsersmod.proto_alias("253"), parsersmod.proto_alias("ic"),
+           parsersmod.proto_alias("")) == ("IGMP", "2", None, None, None))
+    import store as storemod
+    cl, ar = storemod._filter_clauses({"proto": "!igmp"})
+    check("store: proto filter matches name or number, negatable",
+          cl == ["NOT (proto LIKE ? ESCAPE '\\' OR proto = ?)"]
+          and ar == ["%igmp%", "2"], f"{cl} {ar}")
+    cl, ar = storemod._filter_clauses({"proto": "ic"})
+    check("store: proto filter without an alias stays a plain substring",
+          cl == ["proto LIKE ? ESCAPE '\\'"] and ar == ["%ic%"],
+          f"{cl} {ar}")
     check("sophos IPv4 still parses with raw spelling kept",
           (parsersmod.parse_sophos(
               'src_ip=192.168.010.1 dst_ip=8.8.8.8 protocol="TCP" dst_port=53')
@@ -1990,6 +2013,41 @@ def main():
     check("plain HTTP: spoofed X-Forwarded-Proto from an untrusted peer does "
           "not switch HSTS on",
           r.headers.get("Strict-Transport-Security") is None)
+
+    print("== protocol names ==")
+    # IGMP queries as the kernel logs them (PROTO=2), one GRE, plus a row
+    # stored as "2" by a release before the names existed.
+    for i in range(2):
+        send(unifi_line("LAN_IN-B-77", "igmp query", "192.168.77.1",
+                        "224.0.0.1", "2"), P_UNIFI)
+    send(unifi_line("LAN_IN-A-78", "gre tunnel", "192.168.77.2",
+                    "192.168.77.3", "47"), P_UNIFI)
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.execute("INSERT INTO events (ts,device,vendor,src,dst,proto,"
+                 "dst_port,action,rule) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (int(time.time()), "UDM-Test", "unifi", "192.168.77.1",
+                  "224.0.0.1", "2", -1, "Block", "legacy row"))
+    conn.commit()
+    conn.close()
+    time.sleep(2.5)  # past a flush
+    q = "/api/live?since=0&device=UDM-Test&src=192.168.77."
+    ev = get_json(q)["events"]
+    check("IGMP and GRE events stored under their names, port -1",
+          sorted(e["proto"] for e in ev) == ["2", "GRE", "IGMP", "IGMP"]
+          and all(e["dst_port"] == -1 for e in ev if e["proto"] != "2"),
+          str([(e["proto"], e["dst_port"]) for e in ev]))
+    for term in ("2", "igmp", "IGMP"):
+        ev = get_json(q + "&proto=" + term)["events"]
+        check(f"proto filter '{term}' finds the named events and the legacy "
+              "numeric row",
+              sorted(e["proto"] for e in ev) == ["2", "IGMP", "IGMP"],
+              str([e["proto"] for e in ev]))
+    ev = get_json(q + "&proto=!2")["events"]
+    check("proto filter '!2' hides both spellings",
+          [e["proto"] for e in ev] == ["GRE"], str([e["proto"] for e in ev]))
+    ev = get_json(q + "&proto=47")["events"]
+    check("proto filter '47' finds GRE",
+          [e["proto"] for e in ev] == ["GRE"], str([e["proto"] for e in ev]))
 
     print("== graceful stop ==")
     # Queue a batch, then stop inside the flush window: final drain persists it.

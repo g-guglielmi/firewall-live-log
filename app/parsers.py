@@ -35,6 +35,44 @@ import re
 MAX_RULE_LEN = 256
 MAX_PROTO_LEN = 16
 
+# IANA protocol numbers -> names. The Linux kernel (UniFi) and SFOS write
+# the name for the protocols they know (TCP, UDP, ICMP) and fall back to the
+# raw number for the rest, so without this table IGMP shows up as "2" and
+# GRE as "47". Numbers not listed here stay as they are.
+PROTO_NAMES = {
+    "0": "HOPOPT", "1": "ICMP", "2": "IGMP", "4": "IPIP", "6": "TCP",
+    "17": "UDP", "41": "IPV6", "43": "IPV6-ROUTE", "44": "IPV6-FRAG",
+    "46": "RSVP", "47": "GRE", "50": "ESP", "51": "AH", "58": "ICMPV6",
+    "59": "IPV6-NONXT", "60": "IPV6-OPTS", "88": "EIGRP", "89": "OSPF",
+    "94": "IPIP", "97": "ETHERIP", "103": "PIM", "108": "IPCOMP",
+    "112": "VRRP", "115": "L2TP", "132": "SCTP", "136": "UDPLITE",
+    "137": "MPLS-IN-IP", "143": "ETHERNET",
+}
+PROTO_NUMBERS = {}
+for _num, _name in PROTO_NAMES.items():
+    PROTO_NUMBERS.setdefault(_name, _num)   # 4 and 94 are both IPIP; keep 4
+del _num, _name
+
+
+def normalize_proto(raw):
+    """Upper-cased, length-capped protocol field; a bare IANA number is
+    translated to its name when known ("2" -> "IGMP", "47" -> "GRE")."""
+    proto = (raw or "?").strip().upper()[:MAX_PROTO_LEN]
+    return PROTO_NAMES.get(proto, proto) if proto.isdigit() else proto
+
+
+def proto_alias(value):
+    """The other spelling of a protocol filter term, or None: "2" <-> "IGMP",
+    "tcp" <-> "6". Lets a filter typed as a number still find events stored
+    under the name (and rows stored as a number before the names existed,
+    when the filter is typed as the name)."""
+    v = str(value).strip().upper()
+    if not v:
+        return None
+    if v.isdigit():
+        return PROTO_NAMES.get(v)
+    return PROTO_NUMBERS.get(v)
+
 
 def _ip_or_none(value):
     """The address string if it parses as an IPv4/IPv6 address, else None.
@@ -120,7 +158,7 @@ def parse_unifi(line):
     src, dst = _ip_or_none(fields.get("SRC")), _ip_or_none(fields.get("DST"))
     if not src or not dst:
         return None
-    proto = fields.get("PROTO", "?").upper()[:MAX_PROTO_LEN]
+    proto = normalize_proto(fields.get("PROTO"))
     dst_port = _port_or_sentinel(fields.get("DPT"))
 
     m = _U_DESCR.search(line)
@@ -189,7 +227,7 @@ def parse_sophos(line):
     src, dst = _ip_or_none(kv.get("src_ip")), _ip_or_none(kv.get("dst_ip"))
     if not src or not dst:
         return None
-    proto = (kv.get("protocol") or "?").upper()[:MAX_PROTO_LEN]
+    proto = normalize_proto(kv.get("protocol"))
     dst_port = _port_or_sentinel(kv.get("dst_port"))
     rule = (kv.get("fw_rule_name") or (
         f"rule {kv['fw_rule_id']}" if kv.get("fw_rule_id") else ""))[:MAX_RULE_LEN]

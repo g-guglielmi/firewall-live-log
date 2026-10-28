@@ -385,7 +385,7 @@ of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
   "vendor": "unifi",    // unifi | sophos
   "src": "10.0.10.5",   // source IP
   "dst": "93.184.216.34", // destination IP
-  "proto": "TCP",       // TCP | UDP | ICMP | …
+  "proto": "TCP",       // TCP | UDP | ICMP | IGMP | GRE | … (IANA number if unknown)
   "dst_port": 443,      // destination port, or -1 when not applicable (e.g. ICMP)
   "action": "Allow",    // Allow | Block | Drop | Reject | NAT | "?"
   "rule": "Allow LAN web" // firewall rule name/description, may be ""
@@ -440,7 +440,10 @@ Filters (all optional, combined with AND): `device`, `vendor`, `src`,
 `dst`, `proto`, `rule`, `port`, `action` — plus `ip` (matches source **or**
 destination, kept for compatibility). `src`, `dst`, `proto`, `rule`, and
 `ip` match as substrings; `port` matches as a prefix (`44` finds 443 and
-445) — prefix it with `=` for an exact match (`=80` excludes 8080).
+445) — prefix it with `=` for an exact match (`=80` excludes 8080). `proto`
+also accepts the IANA protocol number (`2` finds IGMP, `47` GRE); firewalls
+log a number for protocols other than TCP/UDP/ICMP and the collector stores
+the name, so both spellings find the same events.
 `action` accepts `Allow`, `blocked` (Block/Drop/Reject), or `NAT`
 (DNAT/SNAT/masquerade/port-forward translation records).
 

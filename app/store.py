@@ -11,6 +11,8 @@ import sqlite3
 import time
 import urllib.parse
 
+from parsers import proto_alias
+
 SCHEMA_VERSION = "1"
 
 COLUMNS = ("id", "ts", "device", "vendor", "src", "dst", "proto",
@@ -149,17 +151,25 @@ def _filter_clauses(f):
         like = _like(f["ip"])
         args += [like, like]
     # src/dst/rule/proto are substring matches; a leading "!" negates
-    # (exclude matching rows) so noise can be filtered out.
+    # (exclude matching rows) so noise can be filtered out. A proto term
+    # also matches its other spelling exactly: "2" finds IGMP and "igmp"
+    # finds rows stored as "2" (events written before the names existed).
     for key, col in (("src", "src"), ("dst", "dst"), ("rule", "rule"),
                      ("proto", "proto")):
         val = f.get(key)
         if val:
-            if str(val).startswith("!"):
-                clauses.append(f"{col} NOT LIKE ?{_LIKE_ESCAPE}")
-                args.append(_like(str(val)[1:]))
+            term, neg = str(val), False
+            if term.startswith("!"):
+                term, neg = term[1:], True
+            alt = proto_alias(term) if key == "proto" else None
+            if alt is None:
+                clauses.append(f"{col} {'NOT ' if neg else ''}LIKE ?"
+                               f"{_LIKE_ESCAPE}")
+                args.append(_like(term))
             else:
-                clauses.append(f"{col} LIKE ?{_LIKE_ESCAPE}")
-                args.append(_like(val))
+                clauses.append(f"{'NOT ' if neg else ''}({col} LIKE ?"
+                               f"{_LIKE_ESCAPE} OR {col} = ?)")
+                args += [_like(term), alt]
     if f.get("port"):
         # Prefix match so the result narrows as the user types ("44"
         # matches 443 and 445).  "=" forces an exact match ("=80" excludes
