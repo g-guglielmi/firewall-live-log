@@ -277,6 +277,7 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
+| `AUTH_REQUIRE_TOTP` | `off` | Make two-factor authentication mandatory: `admins` (every admin account) or `all` (every account). An affected user who hasn't set it up is taken to the set-up dialog at sign-in and can't reach anything else until it is on; they can't turn it off afterwards. Admins can still **Reset 2FA** for someone who lost their authenticator (that user re-enrols at next sign-in). |
 | `AUTH_FORCE_SECURE_COOKIE` | `false` | Treat every request as HTTPS: `__Host-` session cookie with the `Secure` flag, plus the HSTS header. Otherwise that happens automatically when a **trusted** proxy sends `X-Forwarded-Proto: https`. Never set it on a plain-HTTP deployment (browsers would refuse the cookie). |
 | `TRUSTED_PROXIES` | _(none)_ | Comma-separated IPs/CIDRs of your reverse proxy (e.g. `172.17.0.1` or `192.168.1.10`). Only from these peers are `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` believed — for per-client lockouts, the automatic `Secure` cookie flag, and the cross-site check. From anyone else they are ignored (logged once per peer) and the real address is used. Direct access from the LAN needs nothing here. |
 | `SESSION_TTL_HOURS` | `12` | Absolute maximum session lifetime (hours). |
@@ -611,6 +612,18 @@ can't be replayed within its 30-second window), and wrong codes count as
 failed logins under the same lockout tiers as a wrong password. Turning 2FA
 off needs your password *and* a current code or recovery code, so a
 hijacked session can't strip its own second factor.
+
+Turning 2FA on signs that account out everywhere else: any other session
+got in without the second factor, so only the one that completed the
+set-up stays.
+
+**Making it mandatory.** Set `AUTH_REQUIRE_TOTP=admins` (or `all`). An
+affected account that hasn't set 2FA up is taken straight to the set-up
+dialog at sign-in and the server answers 403 to everything else until it
+is on; such an account can't turn 2FA off (the button is gone and the API
+refuses). An admin can still reset another user's 2FA if they lost their
+authenticator; that user simply re-enrols at next sign-in. `ADMIN_RESET`
+still works as a last resort for the admin account itself.
 
 **Running low on recovery codes** (or lost the list)? The same dialog has
 **New recovery codes**: confirm your password and a current code (one of

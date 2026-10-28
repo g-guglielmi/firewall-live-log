@@ -880,6 +880,28 @@ class AuthManager:
                 "email": row[8], "totp_enabled": bool(row[9])}
         return user, row[1]
 
+    def revoke_other_sessions(self, user_id, keep_token):
+        """Sign the user out everywhere except the session ``keep_token``
+        (used when 2FA is turned on: whoever else holds a session got in
+        without the new second factor)."""
+        keep = _token_hash(keep_token) if keep_token else ""
+        with self.lock:
+            self.db.execute(
+                "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+                (user_id, keep))
+            self.db.commit()
+
+    def revoke_other_sessions(self, user_id, keep_token):
+        """Sign the user out everywhere except the session ``keep_token``
+        (used when 2FA is turned on: whoever else holds a session got in
+        without the new second factor)."""
+        keep = _token_hash(keep_token) if keep_token else ""
+        with self.lock:
+            self.db.execute(
+                "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+                (user_id, keep))
+            self.db.commit()
+
     def delete_session(self, token):
         if not token:
             return

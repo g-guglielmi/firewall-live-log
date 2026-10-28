@@ -542,10 +542,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="totpTitle">
     <h3 id="totpTitle">Two-factor authentication</h3>
     <div id="tfOff">
-      <div class="sub">Add a second step to sign-in: a 6-digit code from an
-        authenticator app (Aegis, Google Authenticator, Microsoft
-        Authenticator, 1Password, …). Your current password is required to
-        start.</div>
+      <div class="sub" id="tfOffText"></div>
       <label for="tfCur">Current password</label>
       <input id="tfCur" type="password" autocomplete="current-password" maxlength="1024">
     </div>
@@ -776,6 +773,7 @@ async function loadMe() {
   if (gone(res)) return;
   const data = await res.json();
   me = data.user; csrfToken = data.csrf_token || "";
+  me.totp_required = !!data.totp_required;   // server-side AUTH_REQUIRE_TOTP verdict
   recoveryLeft = data.recovery_codes_left || 0;
   sessionIdleOn = !!(data.session && data.session.idle_minutes > 0);
   if (sessionIdleOn) { lastTouch = 0; noteActivity(); }
@@ -788,6 +786,7 @@ async function loadMe() {
   $("orgBtn").style.display = me.role === "admin" ? "" : "none";
   $("userbar").style.display = "";
   if (me.must_change_pw) { openPw(true); }
+  else if (me.totp_required && !me.totp_enabled) { openTotp(true); }
 }
 function toggleUserMenu(open) {
   const m = $("userMenu");
@@ -869,7 +868,7 @@ function escapeModal() {
   if (t === "confirmModal") settleConfirm(false);
   else if (t === "promptModal") settlePrompt(null);
   else if (t === "pwModal") { if (pwForced) return true; closeModal(t); }
-  else if (t === "totpModal" && tfView === "codes") return true;
+  else if (t === "totpModal" && (tfView === "codes" || tfForced)) return true;
   else closeModal(t);
   return true;
 }
@@ -1963,8 +1962,15 @@ function tfShow(view) {
   p.classList.toggle("danger", view === "on");
   $("tfCancel").style.display = view === "codes" ? "none" : "";
   $("tfRenew").style.display = view === "on" ? "" : "none";
+  // An enforced account can't turn 2FA off (the server refuses too) and
+  // can't dismiss the set-up dialog until it is done.
+  const required = !!(me && me.totp_required);
+  if (view === "on" && required) p.style.display = "none";
+  else p.style.display = "";
+  if (tfForced && view !== "codes") $("tfCancel").style.display = "none";
   modalMsg("tfMsg", "");
 }
+let tfForced = false;
 function tfShowCodes(codes, renewed) {
   $("tfCodesText").innerHTML = (renewed
     ? "Here are your <b>new</b> recovery codes; the old ones no longer work. "
@@ -1973,17 +1979,25 @@ function tfShowCodes(codes, renewed) {
   $("tfRecovery").textContent = (codes || []).join("\n");
   tfShow("codes");
 }
-function openTotp() {
+function openTotp(forced) {
+  tfForced = !!forced;
   ["tfCur", "tfCode", "tfOffCur", "tfOffCode"].forEach(id => $(id).value = "");
+  const required = !!(me && me.totp_required);
   if (me && me.totp_enabled) {
     const n = recoveryLeft;
-    $("tfOnText").textContent = "Two-factor authentication is on for your account. " +
-      (n === 0 ? "You have no recovery codes left — turn it off and set it up again to get new ones. "
+    $("tfOnText").textContent = "Two-factor authentication is on for your account" +
+      (required ? " and required by this server's configuration, so it can't be turned off here. " : ". ") +
+      (n === 0 ? "You have no recovery codes left — get a new set below. "
                : `You have ${n} unused recovery code${n === 1 ? "" : "s"}. `) +
-      "To turn it off, or to get a new set of recovery codes, confirm your password and a current code.";
+      (required ? "To get a new set of recovery codes, confirm your password and a current code."
+                : "To turn it off, or to get a new set of recovery codes, confirm your password and a current code.");
     tfShow("on");
     openModal("totpModal", $("tfOffCur"));
   } else {
+    $("tfOffText").textContent = (required
+      ? "This server requires two-factor authentication for your account. Set it up now to continue: "
+      : "Add a second step to sign-in: ") +
+      "a 6-digit code from an authenticator app (Aegis, Google Authenticator, Microsoft Authenticator, 1Password, …). Your current password is required to start.";
     tfShow("off");
     openModal("totpModal", $("tfCur"));
   }
@@ -2026,6 +2040,7 @@ async function tfPrimaryAction() {
   } else if (tfView === "codes") {
     $("tfRecovery").textContent = "";
     closeModal("totpModal");
+    if (tfForced) { tfForced = false; window.location.reload(); }   // boot the pollers fresh
   } else {
     const cur = $("tfOffCur").value, code = $("tfOffCode").value.trim();
     if (!cur || !code) return modalMsg("tfMsg", "Enter your current password and a code.");
@@ -2045,7 +2060,7 @@ async function tfRenewAction() {
   loadMe();
 }
 $("tfRenew").addEventListener("click", tfRenewAction);
-$("totpBtn").addEventListener("click", openTotp);
+$("totpBtn").addEventListener("click", () => openTotp(false));
 $("tfPrimary").addEventListener("click", tfPrimaryAction);
 $("tfCancel").addEventListener("click", () => { $("tfQr").width = 0; $("tfSecret").textContent = ""; closeModal("totpModal"); });
 ["tfCur", "tfCode", "tfOffCode"].forEach(id =>
@@ -2502,7 +2517,7 @@ fetch("/flags/names.json").then(r => r.ok ? r.json() : {}).then(m => {
 // While a password change is pending the server answers 403 to every data
 // route, so the pollers only start once /api/me says the account is clear.
 // (After the change the client signs in again and boots fresh.)
-function pwGate() { return !!(me && me.must_change_pw); }
+function pwGate() { return !!(me && (me.must_change_pw || (me.totp_required && !me.totp_enabled))); }
 (async () => {
   await loadMe();
   if (pwGate()) return;

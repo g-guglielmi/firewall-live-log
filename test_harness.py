@@ -2211,9 +2211,28 @@ def main():
           f"{code} {body}")
     code, me2 = op2_json("/api/me", None, method="GET")
     check("2FA is still off until the code confirms it",
-          me2["user"]["totp_enabled"] is False, str(me2))
+          me2["user"]["totp_enabled"] is False
+          and me2.get("totp_required") is False, str(me2))
     code, body = op2_json("/api/totp/enable", {"code": "123456"}, csrf=v_csrf)
     check("enable with a wrong code -> 400", code == 400, f"{code} {body}")
+    # A second viewer1 session (another browser) exists while 2FA goes on.
+    cj5 = http.cookiejar.CookieJar()
+    op5 = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj5))
+
+    def op5_get(path):
+        try:
+            return op5.open(urllib.request.Request(BASE + path),
+                            timeout=10).status
+        except urllib.error.HTTPError as e:
+            return e.code
+    req5 = urllib.request.Request(
+        BASE + "/api/login", data=json.dumps(
+            {"username": "viewer1", "password": "Recovered-Viewer-1"}).encode(),
+        method="POST")
+    req5.add_header("Content-Type", "application/json")
+    op5.open(req5, timeout=10).read()
+    check("a second session of viewer1 is live before 2FA is turned on",
+          op5_get("/api/me") == 200)
     code, body = op2_json("/api/totp/enable",
                           {"code": authmod.totp_code(v_secret)}, csrf=v_csrf)
     v_codes = body.get("recovery_codes", [])
@@ -2222,6 +2241,8 @@ def main():
           "with 8 codes left",
           code == 200 and len(v_codes) == 8 and me2["user"]["totp_enabled"]
           and me2.get("recovery_codes_left") == 8, f"{code} {body} {me2}")
+    check("turning 2FA on signs the other session out (401) and keeps this "
+          "one (200)", op5_get("/api/me") == 401 and code2 == 200)
     code, body = op2_json("/api/totp/setup",
                           {"current_password": "Recovered-Viewer-1"},
                           csrf=v_csrf)
@@ -2356,6 +2377,107 @@ def main():
     check("dashboard carries the 2FA dialog and the QR encoder",
           'id="totpModal"' in index_page and "function qrMatrix" in index_page
           and "/api/users/totp_reset" in index_page)
+
+    print("== AUTH_REQUIRE_TOTP: mandatory two-factor for admins ==")
+    req_dir = os.path.join(tmp, "req")
+    os.makedirs(req_dir)
+    req_cfg = os.path.join(req_dir, "devices.json")
+    with open(req_cfg, "w") as f:
+        json.dump({"retention_days": 1, "max_events": 0, "devices": [
+            {"name": "Req-Test", "port": 15551, "vendor": "unifi"}]}, f)
+    e_bad = dict(env, DEVICES_CONFIG=req_cfg, HTTP_PORT=str(HTTP_PORT + 2),
+                 DB_PATH=os.path.join(req_dir, "events.db"),
+                 AUTH_DB_PATH=os.path.join(req_dir, "auth.db"),
+                 AUTH_REQUIRE_TOTP="maybe")
+    pr_bad = subprocess.run([sys.executable, "-u", MAIN], env=e_bad,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=30)
+    check("an invalid AUTH_REQUIRE_TOTP value refuses to start (exit 2)",
+          pr_bad.returncode == 2 and "AUTH_REQUIRE_TOTP" in pr_bad.stdout,
+          f"rc={pr_bad.returncode} {pr_bad.stdout[-200:]}")
+    e_req = dict(e_bad, AUTH_REQUIRE_TOTP="admins")
+    pr_req = subprocess.Popen([sys.executable, "-u", MAIN], env=e_req,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True,
+                              creationflags=creationflags)
+    out_req = []
+    threading.Thread(target=read_stdout, args=(pr_req, out_req),
+                     daemon=True).start()
+    up_req = False
+    deadline = time.time() + 15
+    while time.time() < deadline and pr_req.poll() is None:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{HTTP_PORT + 2}/healthz",
+                                   timeout=4).read()
+            up_req = True
+            break
+        except (urllib.error.URLError, ConnectionError, OSError):
+            time.sleep(0.3)
+    check("instance with AUTH_REQUIRE_TOTP=admins starts and says so",
+          up_req and any("two-factor authentication required for admins"
+                         in l for l in out_req), "\n".join(out_req[:12]))
+    if up_req:
+        rp = HTTP_PORT + 2
+
+        def rcall(method, path, body=None, cookie="", csrf=""):
+            h = {}
+            if cookie:
+                h["Cookie"] = f"session={cookie}"
+            if csrf:
+                h["X-CSRF-Token"] = csrf
+            return raw(method, path, body, h, port=rp)
+        st, lg, hl = rcall("POST", "/api/login",
+                           {"username": ADMIN_USER, "password": ADMIN_PASS})
+        ck = [v for k, v in hl if k.lower() == "set-cookie"]
+        a_tok = ck[0].split(";", 1)[0].split("=", 1)[1] if ck else ""
+        a_csrf = lg.get("csrf_token", "")
+        st_me, me_r, _ = rcall("GET", "/api/me", cookie=a_tok)
+        check("admin without 2FA signs in and /api/me flags totp_required",
+              st == 200 and st_me == 200 and me_r.get("totp_required") is True
+              and me_r["user"]["totp_enabled"] is False, f"{st} {me_r}")
+        st, body, _ = rcall("GET", "/api/stats", cookie=a_tok)
+        st2, _, _ = rcall("POST", "/api/users/totp_reset", {"id": 1},
+                          cookie=a_tok, csrf=a_csrf)
+        check("everything else answers 403 'two-factor authentication "
+              "required' until it is set up",
+              st == 403 and "two-factor" in body.get("error", "")
+              and st2 == 403, f"{st} {body} {st2}")
+        st, body, _ = rcall("POST", "/api/totp/setup",
+                            {"current_password": ADMIN_PASS},
+                            cookie=a_tok, csrf=a_csrf)
+        r_secret = body.get("secret", "")
+        st2, body2, _ = rcall("POST", "/api/totp/enable",
+                              {"code": authmod.totp_code(r_secret)},
+                              cookie=a_tok, csrf=a_csrf)
+        st3, _, _ = rcall("GET", "/api/stats", cookie=a_tok)
+        check("the set-up routes are allowed; once 2FA is on the account is "
+              "unlocked", st == 200 and st2 == 200
+              and len(body2.get("recovery_codes", [])) == 8 and st3 == 200,
+              f"{st} {st2} {st3}")
+        st, body, _ = rcall("POST", "/api/totp/disable",
+                            {"current_password": ADMIN_PASS,
+                             "code": body2["recovery_codes"][0]},
+                            cookie=a_tok, csrf=a_csrf)
+        st2, me_r, _ = rcall("GET", "/api/me", cookie=a_tok)
+        check("an enforced account can't turn 2FA off (409, code not "
+              "consumed)", st == 409 and me_r["user"]["totp_enabled"] is True
+              and me_r.get("recovery_codes_left") == 8, f"{st} {body} {me_r}")
+        st, body, _ = rcall("POST", "/api/users",
+                            {"username": "plainuser",
+                             "password": "Plain-User-Pass-1", "role": "user"},
+                            cookie=a_tok, csrf=a_csrf)
+        st2, lg2, hl2 = rcall("POST", "/api/login",
+                              {"username": "plainuser",
+                               "password": "Plain-User-Pass-1"})
+        ck2 = [v for k, v in hl2 if k.lower() == "set-cookie"]
+        u_tok = ck2[0].split(";", 1)[0].split("=", 1)[1] if ck2 else ""
+        st3, me_u, _ = rcall("GET", "/api/me", cookie=u_tok)
+        st4, _, _ = rcall("GET", "/api/stats", cookie=u_tok)
+        check("with 'admins', a plain user is not required to set 2FA up",
+              st == 201 and st2 == 200 and me_u.get("totp_required") is False
+              and st4 == 200, f"{st} {st2} {me_u} {st4}")
+    pr_req.kill()
+    pr_req.wait(timeout=10)
 
     print("== graceful stop ==")
     # Queue a batch, then stop inside the flush window: final drain persists it.

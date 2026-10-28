@@ -55,6 +55,21 @@ def env(name, default=None):
     return v if v not in (None, "") else default
 
 
+def _require_totp(value):
+    """AUTH_REQUIRE_TOTP -> "off" | "admins" | "all"; anything else is a
+    configuration error (exit 2) rather than a silently weaker setting."""
+    v = (value or "").strip().lower()
+    if v in ("", "0", "false", "no", "off", "none", "optional"):
+        return "off"
+    if v in ("admin", "admins"):
+        return "admins"
+    if v in ("1", "true", "yes", "all", "everyone", "users"):
+        return "all"
+    print(f"[web] AUTH_REQUIRE_TOTP={value!r} is not valid: use off, "
+          "admins or all", file=sys.stderr)
+    sys.exit(2)
+
+
 def env_bool(name, default=False):
     v = os.environ.get(name)
     if v is None or v == "":
@@ -245,6 +260,7 @@ def main():
 
     auth_enabled = env_bool("AUTH_ENABLED", True)
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
+    require_totp = _require_totp(env("AUTH_REQUIRE_TOTP"))
     try:
         trusted_proxies = webserver.parse_trusted_proxies(env("TRUSTED_PROXIES"))
         src_nets, src_hosts = sources_mod.parse(env("SYSLOG_ALLOWED_SOURCES"))
@@ -347,7 +363,8 @@ def main():
                             auth_enabled=auth_enabled,
                             force_secure_cookie=force_secure,
                             mailer=mailer, public_url=public_url,
-                            trusted_proxies=trusted_proxies)
+                            trusted_proxies=trusted_proxies,
+                            require_totp=require_totp)
     threading.Thread(target=httpd.serve_forever, name="web",
                      daemon=True).start()
 

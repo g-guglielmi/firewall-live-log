@@ -385,6 +385,7 @@ class Handler(BaseHTTPRequestHandler):
     auth = None                 # auth.AuthManager, or None when disabled
     auth_enabled = True
     force_secure_cookie = False
+    require_totp = "off"        # "off" | "admins" | "all" (AUTH_REQUIRE_TOTP)
     mailer = None               # mailer.Mailer, or None
     public_url = None           # e.g. https://firewall.example.com
     trusted_proxies = ()        # ip_network tuple; see parse_trusted_proxies
@@ -629,6 +630,26 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    # AUTH_REQUIRE_TOTP: an account that must use 2FA but hasn't set it up
+    # yet can only reach the dashboard shell and the set-up routes, so the
+    # requirement can't be sidestepped by never opening the dialog.
+    _TOTP_SETUP_ALLOWED = frozenset({"/", "/index.html", "/api/me",
+                                     "/api/totp/setup", "/api/totp/enable",
+                                     "/api/logout", "/api/session/touch"})
+
+    def _totp_required(self, user):
+        if not self.auth_enabled or not user:
+            return False
+        return self.require_totp == "all" or (
+            self.require_totp == "admins" and user.get("role") == "admin")
+
+    def _second_factor_pending(self, user, path):
+        if self._totp_required(user) and not user.get("totp_enabled") and \
+                path not in self._TOTP_SETUP_ALLOWED:
+            self._json({"error": "two-factor authentication required"}, 403)
+            return True
+        return False
+
     # -- GET ---------------------------------------------------------------
     def do_GET(self):
         self._user_cache = "unset"
@@ -685,6 +706,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self._password_change_pending(user, path):
                 return
+            if self._second_factor_pending(user, path):
+                return
 
             if path in ("/", "/index.html"):
                 self._serve_html("index.html")
@@ -698,6 +721,7 @@ class Handler(BaseHTTPRequestHandler):
                                      ("id", "username", "role",
                                       "must_change_pw", "email",
                                       "totp_enabled")},
+                            "totp_required": self._totp_required(user),
                             "recovery_codes_left": left,
                             "csrf_token": authed[1],
                             "session": {"idle_minutes": idle_min,
@@ -799,6 +823,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self._password_change_pending(user, path):
                 return
+            if self._second_factor_pending(user, path):
+                return
 
             if path == "/api/logout":
                 if self.auth_enabled:
@@ -880,6 +906,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "invalid or missing CSRF token"}, 403)
                 return
             if self._password_change_pending(user, path):
+                return
+            if self._second_factor_pending(user, path):
                 return
             kprefix = "/api/api_keys/"
             if path.startswith(kprefix):
@@ -1005,6 +1033,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "code must be a string"}, 400)
             return
         codes = self.auth.totp_confirm(user["id"], code)   # AuthError 400
+        # Every other session of this account got in without the second
+        # factor; only the one that just set it up stays signed in.
+        self.auth.revoke_other_sessions(user["id"], self._cookie_token())
         self._json({"ok": True, "recovery_codes": codes})
 
     def _second_factor_ok(self, user, body):
@@ -1026,6 +1057,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_totp_disable(self, user):
         body = self._read_json_body()
+        if self._totp_required(user):
+            self._json({"error": "two-factor authentication is required for "
+                        "your account (AUTH_REQUIRE_TOTP)"}, 409)
+            return
         if not self._second_factor_ok(user, body):
             return
         self.auth.totp_disable(user["id"])
@@ -1405,11 +1440,12 @@ class Server(ThreadingHTTPServer):
 
 def serve(state, bind, port, auth_manager=None, auth_enabled=True,
           force_secure_cookie=False, mailer=None, public_url=None,
-          trusted_proxies=()):
+          trusted_proxies=(), require_totp="off"):
     Handler.state = state
     Handler.auth = auth_manager
     Handler.auth_enabled = auth_enabled
     Handler.force_secure_cookie = force_secure_cookie
+    Handler.require_totp = require_totp
     Handler.mailer = mailer
     Handler.public_url = public_url
     Handler.trusted_proxies = tuple(trusted_proxies)
@@ -1422,4 +1458,8 @@ def serve(state, bind, port, auth_manager=None, auth_enabled=True,
     print(f"[web] dashboard on http://{bind}:{port} "
           f"(auth {mode}, email reset {reset})")
     print(f"[web] trusted proxies: {proxies}", flush=True)
+    if auth_enabled and require_totp != "off":
+        who = "admins" if require_totp == "admins" else "every user"
+        print(f"[web] two-factor authentication required for {who} "
+              "(AUTH_REQUIRE_TOTP)", flush=True)
     return httpd
