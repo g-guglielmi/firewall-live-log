@@ -21,6 +21,14 @@ Security properties:
   * Password hashing never runs while the DB lock is held and is bounded to
     a few concurrent runs, so a pre-auth login/reset flood cannot stall the
     session lookups that every authenticated request depends on.
+  * Optional per-user two-factor authentication: TOTP (RFC 6238, HMAC-SHA1,
+    30 s, 6 digits) with eight single-use recovery codes. A code is accepted
+    once (the time step is burned, so an intercepted code can't be replayed),
+    wrong codes count as failed logins under the same lockout tiers, and the
+    password step no longer clears the failure history for a 2FA account —
+    only the completed second step does. The TOTP secret must be kept in
+    clear (it is what the authenticator shares); recovery codes are stored
+    as SHA-256 hashes.
 """
 
 import base64
@@ -31,6 +39,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import urllib.parse
 
 # --- Tunables -------------------------------------------------------------
 PBKDF2_ITERATIONS = 600_000          # OWASP 2023 floor for PBKDF2-SHA256
@@ -55,6 +64,20 @@ RESET_MAX_PER_USER = 5               # ...per account within the window
 RESET_MAX_PER_IP = 20                # ...per source IP within the window
 RESET_ATTEMPT_MAX_PER_IP = 20        # token submissions per IP per window
 
+# Two-factor authentication (TOTP, RFC 6238) tunables.
+TOTP_DIGITS = 6
+TOTP_PERIOD_SEC = 30
+TOTP_WINDOW = 1                      # accept the previous/next step (skew)
+TOTP_SECRET_BYTES = 20               # 160-bit shared secret (RFC 4226 floor)
+TOTP_PENDING_TTL_SEC = 10 * 60       # confirm an enrolment within 10 min
+TOTP_LOGIN_TTL_SEC = 5 * 60          # finish the second sign-in step in 5 min
+TOTP_LOGIN_MAX_ATTEMPTS = 5          # code guesses per pending sign-in
+RECOVERY_CODE_COUNT = 8
+TOTP_ISSUER = "Firewall Live Log"
+# Recovery codes: 10 chars from an alphabet without 0/o/1/i/l (~49 bits),
+# shown as xxxxx-xxxxx; compared case-insensitively and without the dash.
+_RECOVERY_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
 # API keys (bearer tokens for programmatic, read-only access).
 API_KEY_PREFIX = "fll_"             # recognisable prefix (helps secret scanners)
 API_KEY_DISPLAY_LEN = 12            # chars kept in clear for the UI ("fll_" + 8)
@@ -68,7 +91,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # Column order here must match AuthManager._row_to_user().
 _USER_SELECT = ("SELECT id, username, pw_hash, role, must_change_pw, "
-                "created_at, email FROM users")
+                "created_at, email, totp_secret, totp_last_step FROM users")
 
 # A fixed hash of a throwaway password. verify_login() runs a PBKDF2 pass
 # against this when the username is unknown, so a missing user and a wrong
@@ -174,6 +197,71 @@ def _validate_email(email):
     return email
 
 
+# --- TOTP (RFC 6238) --------------------------------------------------------
+def totp_secret():
+    """A fresh base32 shared secret (what the authenticator app stores)."""
+    return base64.b32encode(secrets.token_bytes(TOTP_SECRET_BYTES)).decode()
+
+
+def hotp(secret_b32, counter, digits=TOTP_DIGITS):
+    """RFC 4226 HOTP: HMAC-SHA1 over the 8-byte counter, dynamic truncation,
+    ``digits`` decimal digits (zero-padded)."""
+    s = secret_b32.strip().replace(" ", "").upper()
+    key = base64.b32decode(s + "=" * (-len(s) % 8))
+    mac = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    code = int.from_bytes(mac[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(code % (10 ** digits)).zfill(digits)
+
+
+def totp_step(now=None, period=TOTP_PERIOD_SEC):
+    return int(time.time() if now is None else now) // period
+
+
+def totp_code(secret_b32, now=None):
+    """The code an authenticator shows right now (used by tests/tools)."""
+    return hotp(secret_b32, totp_step(now))
+
+
+def totp_match(secret_b32, code, now=None, last_step=None):
+    """The time step ``code`` is valid for (current step +/- TOTP_WINDOW),
+    or None. Steps at or before ``last_step`` are refused, so a code that
+    already signed someone in can't be replayed within its window."""
+    if not isinstance(code, str):
+        return None
+    code = code.strip().replace(" ", "")
+    if len(code) != TOTP_DIGITS or not code.isdigit():
+        return None
+    step = totp_step(now)
+    found = None
+    for delta in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+        s = step + delta
+        if last_step is not None and s <= last_step:
+            continue
+        # No early exit: every candidate is computed and compared.
+        if hmac.compare_digest(hotp(secret_b32, s), code) and found is None:
+            found = s
+    return found
+
+
+def otpauth_uri(secret_b32, username, issuer=TOTP_ISSUER):
+    """The otpauth:// URI authenticator apps import (as a QR code or by
+    hand). Issuer and account are percent-encoded; the secret is base32."""
+    q = urllib.parse.quote
+    return (f"otpauth://totp/{q(issuer, safe='')}:{q(username, safe='')}"
+            f"?secret={secret_b32}&issuer={q(issuer, safe='')}"
+            f"&algorithm=SHA1&digits={TOTP_DIGITS}&period={TOTP_PERIOD_SEC}")
+
+
+def _recovery_code():
+    s = "".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(10))
+    return s[:5] + "-" + s[5:]
+
+
+def _norm_recovery(code):
+    return code.strip().lower().replace("-", "").replace(" ", "")
+
+
 def _token_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -250,11 +338,36 @@ class AuthManager:
                 last_used_at INTEGER,
                 expires_at   INTEGER
             );
+            CREATE TABLE IF NOT EXISTS totp_pending (
+                user_id    INTEGER PRIMARY KEY,
+                secret     TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS totp_recovery (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id   INTEGER NOT NULL,
+                code_hash TEXT NOT NULL,
+                used_at   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_totp_recovery_user
+                ON totp_recovery(user_id);
+            CREATE TABLE IF NOT EXISTS totp_logins (
+                token_hash TEXT PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                ip         TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts   INTEGER NOT NULL DEFAULT 0
+            );
         """)
-        # Migrate older auth.db files (pre-email) in place.
+        # Migrate older auth.db files (pre-email, pre-2FA) in place.
         cols = [r[1] for r in self.db.execute("PRAGMA table_info(users)")]
         if "email" not in cols:
             self.db.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        if "totp_secret" not in cols:
+            self.db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+            self.db.execute(
+                "ALTER TABLE users ADD COLUMN totp_last_step INTEGER")
         self.db.commit()
         if _DUMMY_HASH is None:
             _DUMMY_HASH = hash_password(secrets.token_urlsafe(16))
@@ -290,7 +403,9 @@ class AuthManager:
             return None
         return {"id": row[0], "username": row[1], "role": row[3],
                 "must_change_pw": bool(row[4]), "created_at": row[5],
-                "email": row[6], "_pw_hash": row[2]}
+                "email": row[6], "totp_enabled": bool(row[7]),
+                "_pw_hash": row[2], "_totp_secret": row[7],
+                "_totp_last_step": row[8]}
 
     def get_user_by_name(self, username):
         with self.lock:
@@ -330,11 +445,12 @@ class AuthManager:
     def list_users(self):
         with self.lock:
             rows = self.db.execute(
-                "SELECT id, username, role, must_change_pw, created_at, email "
-                "FROM users ORDER BY id").fetchall()
+                "SELECT id, username, role, must_change_pw, created_at, "
+                "email, totp_secret IS NOT NULL FROM users ORDER BY id"
+            ).fetchall()
         return [{"id": r[0], "username": r[1], "role": r[2],
                  "must_change_pw": bool(r[3]), "created_at": r[4],
-                 "email": r[5]} for r in rows]
+                 "email": r[5], "totp_enabled": bool(r[6])} for r in rows]
 
     def delete_user(self, user_id):
         with self.lock:
@@ -351,6 +467,9 @@ class AuthManager:
             self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
             self.db.execute("DELETE FROM sessions WHERE user_id = ?",
                             (user_id,))
+            for table in ("totp_pending", "totp_recovery", "totp_logins"):
+                self.db.execute(f"DELETE FROM {table} WHERE user_id = ?",
+                                (user_id,))
             self.db.commit()
 
     def set_password(self, user_id, new_password, must_change_pw=False,
@@ -458,7 +577,10 @@ class AuthManager:
             self.db.execute(
                 "INSERT INTO login_attempts (username, ip, ts, success) "
                 "VALUES (?,?,?,?)", (username, ip, now, 1 if ok else 0))
-            if ok:
+            if ok and not user["totp_enabled"]:
+                # For a 2FA account the history is only cleared once the
+                # second step succeeds (totp_login_finish); otherwise a
+                # known password would reset the code-guess counter at will.
                 self.db.execute(
                     "DELETE FROM login_attempts WHERE username = ? "
                     "COLLATE NOCASE AND success = 0", (username,))
@@ -499,6 +621,182 @@ class AuthManager:
                     "VALUES (?,?,?,0)", (username, ip, now))
             self.db.commit()
         return ok
+
+    # -- two-factor authentication (TOTP) ---------------------------------
+    def totp_begin(self, user_id):
+        """Start enrolment: a fresh secret kept aside (not active yet) until
+        the user proves the authenticator has it. Returns (secret, otpauth
+        URI). Starting again replaces an earlier unconfirmed secret."""
+        user = self.get_user_by_id(user_id)
+        if not user:
+            raise AuthError("user not found", code=404)
+        secret = totp_secret()
+        with self.lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO totp_pending (user_id, secret, "
+                "created_at) VALUES (?,?,?)",
+                (user_id, secret, int(time.time())))
+            self.db.commit()
+        return secret, otpauth_uri(secret, user["username"])
+
+    def totp_confirm(self, user_id, code, now=None):
+        """Activate the pending secret once ``code`` proves the app has it.
+        Mints the recovery codes and returns them in clear — the only time
+        they are visible. Raises AuthError(400) otherwise."""
+        now = int(time.time() if now is None else now)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT secret, created_at FROM totp_pending WHERE user_id = ?",
+                (user_id,)).fetchone()
+        if not row or row[1] < now - TOTP_PENDING_TTL_SEC:
+            raise AuthError("no set-up in progress (or it timed out); "
+                            "start again", code=400)
+        step = totp_match(row[0], code, now)
+        if step is None:
+            raise AuthError("that code is not right; check the app and "
+                            "try again", code=400)
+        codes = [_recovery_code() for _ in range(RECOVERY_CODE_COUNT)]
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE users SET totp_secret = ?, totp_last_step = ? "
+                "WHERE id = ?", (row[0], step, user_id))
+            if cur.rowcount == 0:
+                raise AuthError("user not found", code=404)
+            self.db.execute("DELETE FROM totp_pending WHERE user_id = ?",
+                            (user_id,))
+            self.db.execute("DELETE FROM totp_recovery WHERE user_id = ?",
+                            (user_id,))
+            self.db.executemany(
+                "INSERT INTO totp_recovery (user_id, code_hash) VALUES (?,?)",
+                [(user_id, _token_hash(_norm_recovery(c))) for c in codes])
+            self.db.commit()
+        return codes
+
+    def totp_disable(self, user_id):
+        """Turn 2FA off: secret, recovery codes, pending set-ups and pending
+        sign-ins all go. Used by the user (after password + code) and by an
+        admin resetting someone who lost their authenticator."""
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE users SET totp_secret = NULL, totp_last_step = NULL "
+                "WHERE id = ?", (user_id,))
+            if cur.rowcount == 0:
+                raise AuthError("user not found", code=404)
+            for table in ("totp_pending", "totp_recovery", "totp_logins"):
+                self.db.execute(f"DELETE FROM {table} WHERE user_id = ?",
+                                (user_id,))
+            self.db.commit()
+
+    def recovery_codes_left(self, user_id):
+        with self.lock:
+            return self.db.execute(
+                "SELECT COUNT(*) FROM totp_recovery WHERE user_id = ? "
+                "AND used_at IS NULL", (user_id,)).fetchone()[0]
+
+    def _consume_second_factor(self, user_id, secret, last_step, code, now):
+        """True when ``code`` is the current TOTP code (its step is then
+        burned) or an unused recovery code (then marked used)."""
+        if not isinstance(code, str) or not code or len(code) > 64:
+            return False
+        step = totp_match(secret, code, now, last_step)
+        with self.lock:
+            if step is not None:
+                self.db.execute(
+                    "UPDATE users SET totp_last_step = ? WHERE id = ?",
+                    (step, user_id))
+                self.db.commit()
+                return True
+            h = _token_hash(_norm_recovery(code))
+            hit = None
+            for rid, ch in self.db.execute(
+                    "SELECT id, code_hash FROM totp_recovery WHERE "
+                    "user_id = ? AND used_at IS NULL", (user_id,)).fetchall():
+                if hmac.compare_digest(ch, h):     # no early exit
+                    hit = rid
+            if hit is None:
+                return False
+            self.db.execute(
+                "UPDATE totp_recovery SET used_at = ? WHERE id = ?",
+                (now, hit))
+            self.db.commit()
+            return True
+
+    def verify_totp_code(self, user_id, code, now=None):
+        """A signed-in user's second factor for a sensitive action (turning
+        2FA off): the current code or an unused recovery code."""
+        now = int(time.time() if now is None else now)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT totp_secret, totp_last_step FROM users WHERE id = ?",
+                (user_id,)).fetchone()
+        if not row or not row[0]:
+            return False
+        return self._consume_second_factor(user_id, row[0], row[1], code, now)
+
+    def totp_login_begin(self, user_id, ip, now=None):
+        """After the password checked out for a 2FA account: a short-lived,
+        single-purpose token the client sends back with the code. No session
+        exists until the code is right."""
+        token = secrets.token_urlsafe(32)
+        now = int(time.time() if now is None else now)
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO totp_logins (token_hash, user_id, ip, created_at, "
+                "expires_at, attempts) VALUES (?,?,?,?,?,0)",
+                (_token_hash(token), user_id, ip, now,
+                 now + TOTP_LOGIN_TTL_SEC))
+            self.db.commit()
+        return token
+
+    def totp_login_finish(self, token, code, ip, now=None):
+        """Second sign-in step. Returns the user when ``code`` (TOTP or a
+        recovery code) is right. A wrong code is a failed login under the
+        usual lockout tiers; the token dies after TOTP_LOGIN_MAX_ATTEMPTS
+        or TOTP_LOGIN_TTL_SEC. Raises AuthError (401/429)."""
+        now = int(time.time() if now is None else now)
+        if not token or not isinstance(token, str) or len(token) > 128:
+            raise AuthError("sign-in step expired; start again", code=401)
+        th = _token_hash(token)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT t.user_id, t.expires_at, t.attempts, u.username, "
+                "u.totp_secret, u.totp_last_step FROM totp_logins t "
+                "JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?",
+                (th,)).fetchone()
+            if not row or row[1] < now or                     row[2] >= TOTP_LOGIN_MAX_ATTEMPTS or not row[4]:
+                self.db.execute("DELETE FROM totp_logins WHERE token_hash = ?",
+                                (th,))
+                self.db.commit()
+                raise AuthError("sign-in step expired; start again",
+                                code=401)
+            user_id, _, attempts, username, secret, last_step = row
+            locked_until = self._locked_until(username, ip, now)
+            if locked_until:
+                raise AuthError("too many failed attempts; try again later",
+                                429, retry_after=max(1, locked_until - now))
+            self.db.execute(
+                "UPDATE totp_logins SET attempts = attempts + 1 "
+                "WHERE token_hash = ?", (th,))
+            self.db.commit()
+        ok = self._consume_second_factor(user_id, secret, last_step, code,
+                                         now)
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO login_attempts (username, ip, ts, success) "
+                "VALUES (?,?,?,?)", (username, ip, now, 1 if ok else 0))
+            if ok:
+                self.db.execute("DELETE FROM totp_logins WHERE token_hash = ?",
+                                (th,))
+                self.db.execute(
+                    "DELETE FROM login_attempts WHERE username = ? "
+                    "COLLATE NOCASE AND success = 0", (username,))
+            elif attempts + 1 >= TOTP_LOGIN_MAX_ATTEMPTS:
+                self.db.execute("DELETE FROM totp_logins WHERE token_hash = ?",
+                                (th,))
+            self.db.commit()
+        if not ok:
+            raise AuthError("that code is not right", code=401)
+        return self.get_user_by_id(user_id)
 
     # -- sessions ----------------------------------------------------------
     def create_session(self, user_id):
@@ -547,7 +845,8 @@ class AuthManager:
         with self.lock:
             row = self.db.execute(
                 "SELECT s.user_id, s.csrf_token, s.expires_at, u.id, "
-                "u.username, u.role, u.must_change_pw, u.created_at, u.email "
+                "u.username, u.role, u.must_change_pw, u.created_at, "
+                "u.email, u.totp_secret IS NOT NULL "
                 "FROM sessions s JOIN users u ON u.id = s.user_id "
                 "WHERE s.token_hash = ?", (th,)).fetchone()
             if not row:
@@ -559,7 +858,7 @@ class AuthManager:
                 return None
         user = {"id": row[3], "username": row[4], "role": row[5],
                 "must_change_pw": bool(row[6]), "created_at": row[7],
-                "email": row[8]}
+                "email": row[8], "totp_enabled": bool(row[9])}
         return user, row[1]
 
     def delete_session(self, token):
@@ -753,6 +1052,10 @@ class AuthManager:
                             "WHERE expires_at < ? OR used = 1", (now,))
             self.db.execute("DELETE FROM reset_attempts WHERE ts < ?",
                             (now - RESET_WINDOW_SEC,))
+            self.db.execute("DELETE FROM totp_logins WHERE expires_at < ?",
+                            (now,))
+            self.db.execute("DELETE FROM totp_pending WHERE created_at < ?",
+                            (now - TOTP_PENDING_TTL_SEC,))
             self.db.commit()
 
     def close(self):

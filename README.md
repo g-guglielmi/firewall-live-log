@@ -592,6 +592,32 @@ If SMTP or `PUBLIC_URL` isn't configured, the link simply does nothing (the
 page still shows the same generic message) and admins can always reset a
 user from the Users panel instead.
 
+### Two-factor authentication (TOTP)
+
+Any user can add a second sign-in step from the account menu
+(**Two-factor authentication**): time-based one-time codes (TOTP, RFC 6238
+— SHA-1, 6 digits, 30 seconds) from an authenticator app such as Aegis,
+Google Authenticator, Microsoft Authenticator or 1Password. Set-up asks for
+your current password, shows a QR code (drawn in the browser; nothing is
+fetched from outside) plus the key for manual entry, and only turns 2FA on
+once a code from the app confirms the app has the key. You then get **eight
+single-use recovery codes** — shown once, so store them: each signs you in
+once if you lose the app.
+
+Signing in then takes two steps: password, then the code (or a recovery
+code). No session exists until the second step succeeds, the step must be
+completed within 5 minutes, a code is accepted once (so an intercepted code
+can't be replayed within its 30-second window), and wrong codes count as
+failed logins under the same lockout tiers as a wrong password. Turning 2FA
+off needs your password *and* a current code or recovery code, so a
+hijacked session can't strip its own second factor.
+
+**Lost the authenticator?** Use a recovery code, or ask an admin: the Users
+panel has a **Reset 2FA** action for other accounts. An admin can't reset
+their own this way; if the only admin is locked out, `ADMIN_RESET` (next
+section) also turns 2FA off for that account. 2FA is optional and per
+user; API keys are unaffected (they never go through the login flow).
+
 ### Forgot the admin password?
 
 If you're locked out and have no other admin, recover in place with
@@ -607,9 +633,9 @@ docker run -d --name firewall-live-log --restart unless-stopped \
 ```
 
 On start this resets the `ADMIN_USERNAME` account (default `admin`): it
-sets the new password, ensures the account is an admin, clears any
-brute-force lockout, and revokes its old sessions — **without touching any
-other user or your event history**. If you leave `ADMIN_PASSWORD` blank, a
+sets the new password, ensures the account is an admin, turns off its
+two-factor authentication, clears any brute-force lockout, and revokes its
+old sessions — **without touching any other user or your event history**. If you leave `ADMIN_PASSWORD` blank, a
 random password is generated and printed to the logs instead.
 
 **Then remove `ADMIN_RESET`** (set it back to `false` or delete the
@@ -637,6 +663,13 @@ to wipe all accounts and start over.
   still work. Changing your **own email** requires your current
   password (throttled like a login), so a hijacked session can't
   redirect reset links.
+- **Two-factor authentication** (optional, per user) is TOTP with recovery
+  codes; see above. The shared secret has to be stored in clear (it is what
+  the app and the server both compute from), so it lives in `auth.db` like
+  everything else — keep the data mount private. Recovery codes are stored
+  only as SHA-256 hashes. The password step of a 2FA account does *not*
+  clear its failed-attempt history; only the completed second step does,
+  so a known password can't be used to reset the code-guess counter.
 - **Reverse-proxy headers are only trusted from your proxy.**
   `X-Forwarded-For` and friends are ordinary request headers anyone can
   send, so they are honoured only when the TCP peer is listed in

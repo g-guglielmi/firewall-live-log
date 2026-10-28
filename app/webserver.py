@@ -692,9 +692,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/me":
                 idle_min = (self.auth.idle_sec // 60) if self.auth else 0
                 max_hrs = (self.auth.max_ttl_sec / 3600) if self.auth else 0
+                left = (self.auth.recovery_codes_left(user["id"])
+                        if self.auth and user.get("totp_enabled") else 0)
                 self._json({"user": {k: user.get(k) for k in
                                      ("id", "username", "role",
-                                      "must_change_pw", "email")},
+                                      "must_change_pw", "email",
+                                      "totp_enabled")},
+                            "recovery_codes_left": left,
                             "csrf_token": authed[1],
                             "session": {"idle_minutes": idle_min,
                                         "max_hours": max_hrs}})
@@ -775,6 +779,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/login":
                 self._handle_login()
                 return
+            if path == "/api/login/totp":
+                self._handle_login_totp()
+                return
             if path == "/api/forgot_password":
                 self._handle_forgot_password()
                 return
@@ -820,6 +827,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/users/set_role":
                 self._handle_set_role(user)
+                return
+            if path == "/api/users/totp_reset":
+                self._handle_admin_totp_reset(user)
+                return
+            if path == "/api/totp/setup":
+                self._handle_totp_setup(user)
+                return
+            if path == "/api/totp/enable":
+                self._handle_totp_enable(user)
+                return
+            if path == "/api/totp/disable":
+                self._handle_totp_disable(user)
                 return
             if path == "/api/api_keys":
                 self._handle_create_api_key(user)
@@ -917,6 +936,17 @@ class Handler(BaseHTTPRequestHandler):
             headers = {"Retry-After": str(retry)} if retry else None
             self._json({"error": err}, 429 if retry else 401, headers=headers)
             return
+        if user.get("totp_enabled"):
+            # Password OK but no session yet: the client comes back to
+            # /api/login/totp with this short-lived token and the code.
+            pending = self.auth.totp_login_begin(user["id"],
+                                                 self._client_ip())
+            self._json({"ok": False, "totp_required": True,
+                        "pending": pending})
+            return
+        self._start_session(user)
+
+    def _start_session(self, user):
         token, csrf, expires = self.auth.create_session(user["id"])
         self._json(
             {"ok": True, "csrf_token": csrf,
@@ -925,6 +955,90 @@ class Handler(BaseHTTPRequestHandler):
                       "must_change_pw": user["must_change_pw"]}},
             headers=self._set_session_cookie(
                 token, self.auth.max_ttl_sec))
+
+    def _handle_login_totp(self):
+        """Second sign-in step for a 2FA account (public route: there is no
+        session yet). AuthError 401/429 -> do_POST."""
+        if not self.auth_enabled:
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            body = self._read_json_body()
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "invalid request body"}, 400)
+            return
+        pending = body.get("pending", "")
+        code = body.get("code", "")
+        if not isinstance(pending, str) or not isinstance(code, str):
+            self._json({"error": "invalid request body"}, 400)
+            return
+        user = self.auth.totp_login_finish(pending, code, self._client_ip())
+        self._start_session(user)
+
+    def _reauth_ok(self, user, body):
+        """Current-password check shared by the 2FA routes: throttled and
+        lockout-aware like a login (AuthError 429 -> do_POST)."""
+        current = body.get("current_password", "")
+        return isinstance(current, str) and \
+            self.auth.verify_current_password(user["id"], current,
+                                              self._client_ip())
+
+    def _handle_totp_setup(self, user):
+        body = self._read_json_body()
+        if not self._reauth_ok(user, body):
+            self._json({"error": "current password is incorrect"}, 403)
+            return
+        if user.get("totp_enabled"):
+            self._json({"error": "two-factor authentication is already on; "
+                        "turn it off first to set it up again"}, 409)
+            return
+        secret, uri = self.auth.totp_begin(user["id"])
+        self._json({"ok": True, "secret": secret, "otpauth": uri})
+
+    def _handle_totp_enable(self, user):
+        body = self._read_json_body()
+        code = body.get("code", "")
+        if not isinstance(code, str):
+            self._json({"error": "code must be a string"}, 400)
+            return
+        codes = self.auth.totp_confirm(user["id"], code)   # AuthError 400
+        self._json({"ok": True, "recovery_codes": codes})
+
+    def _handle_totp_disable(self, user):
+        body = self._read_json_body()
+        if not user.get("totp_enabled"):
+            self._json({"error": "two-factor authentication is not on"}, 409)
+            return
+        if not self._reauth_ok(user, body):
+            self._json({"error": "current password is incorrect"}, 403)
+            return
+        code = body.get("code", "")
+        if not isinstance(code, str) or \
+                not self.auth.verify_totp_code(user["id"], code):
+            self._json({"error": "that code is not right"}, 403)
+            return
+        self.auth.totp_disable(user["id"])
+        self._json({"ok": True})
+
+    def _handle_admin_totp_reset(self, user):
+        """An admin clears 2FA for a user who lost their authenticator. Not
+        for the admin's own account: that goes through /api/totp/disable
+        with the password and a code, so a hijacked admin session can't
+        strip its own second factor."""
+        if user["role"] != "admin":
+            self._json({"error": "admin required"}, 403)
+            return
+        body = self._read_json_body()
+        target = _body_id(body.get("id"))
+        if target is None:
+            self._json({"error": "id must be an integer"}, 400)
+            return
+        if target == user["id"]:
+            self._json({"error": "turn off your own two-factor "
+                        "authentication from the account menu"}, 400)
+            return
+        self.auth.totp_disable(target)                      # 404 if unknown
+        self._json({"ok": True})
 
     def _handle_change_password(self, user):
         body = self._read_json_body()

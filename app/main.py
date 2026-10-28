@@ -108,6 +108,8 @@ def _reset_admin(manager):
             manager.set_password(existing["id"], password,
                                 must_change_pw=not supplied)
             manager.set_role(existing["id"], "admin")
+            # A lost authenticator is the other way to be locked out.
+            manager.totp_disable(existing["id"])
             if admin_email:
                 manager.set_email(existing["id"], admin_email)
             action = "reset password for admin"

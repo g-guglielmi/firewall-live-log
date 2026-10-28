@@ -340,6 +340,9 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
   font-size:12.5px; word-break:break-all; margin:7px 0; color:var(--ink);
   background:var(--page); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
 .keybox .warn { font-size:12px; color:var(--ink-2); }
+.keybox code.multi { white-space:pre; word-break:normal; column-count:2; column-gap:18px; }
+.qrwrap { display:flex; justify-content:center; margin:12px 0 4px; }
+.qrwrap canvas { background:#fff; border-radius:8px; image-rendering:pixelated; }
 .hint { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
 .hint code { font-family:ui-monospace,"Cascadia Mono",Menlo,monospace;
   background:var(--page); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
@@ -386,6 +389,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
         <button class="menu-item" id="orgBtn" role="menuitem" data-init-hidden>Organize systems</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
+        <button class="menu-item" id="totpBtn" role="menuitem">Two-factor authentication</button>
         <div class="menu-sep"></div>
         <div class="menu-theme">Theme
           <span class="seg" id="themeSeg" role="group" aria-label="Theme">
@@ -530,6 +534,48 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     <div class="actions">
       <button id="emCancel">Cancel</button>
       <button class="primary" id="emSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-back" id="totpModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="totpTitle">
+    <h3 id="totpTitle">Two-factor authentication</h3>
+    <div id="tfOff">
+      <div class="sub">Add a second step to sign-in: a 6-digit code from an
+        authenticator app (Aegis, Google Authenticator, Microsoft
+        Authenticator, 1Password, …). Your current password is required to
+        start.</div>
+      <label for="tfCur">Current password</label>
+      <input id="tfCur" type="password" autocomplete="current-password" maxlength="1024">
+    </div>
+    <div id="tfSetup">
+      <div class="sub">Scan the QR code with your authenticator app (or type
+        the key in by hand), then enter the code the app shows to confirm.</div>
+      <div class="qrwrap"><canvas id="tfQr" width="0" height="0" aria-label="QR code for the authenticator app"></canvas></div>
+      <div class="keybox show"><div class="lbl">Key for manual entry</div><code id="tfSecret"></code>
+        <span class="warn">Time-based (TOTP), SHA-1, 6 digits, 30 seconds.</span></div>
+      <label for="tfCode">6-digit code from the app</label>
+      <input id="tfCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" spellcheck="false">
+    </div>
+    <div id="tfCodes">
+      <div class="sub">Two-factor authentication is now <b>on</b>. Each
+        recovery code below signs you in once if you lose the app. Store them
+        somewhere safe — this is the only time they are shown.</div>
+      <div class="keybox show"><div class="lbl">Recovery codes</div><code id="tfRecovery" class="multi"></code>
+        <div class="actions mt10"><button id="tfCopy">Copy</button></div></div>
+    </div>
+    <div id="tfOn">
+      <div class="sub" id="tfOnText"></div>
+      <label for="tfOffCur">Current password</label>
+      <input id="tfOffCur" type="password" autocomplete="current-password" maxlength="1024">
+      <label for="tfOffCode">Code from the app (or a recovery code)</label>
+      <input id="tfOffCode" type="text" autocomplete="one-time-code" maxlength="16" spellcheck="false">
+    </div>
+    <div class="msg" id="tfMsg"></div>
+    <div class="actions">
+      <button id="tfCancel">Cancel</button>
+      <button class="primary" id="tfPrimary">Set up</button>
     </div>
   </div>
 </div>
@@ -715,6 +761,7 @@ function noteActivity() {
     .catch(() => {});
 }
 function toLogin() { window.location.replace("/login"); }
+let recoveryLeft = 0;
 // Returns true if the response indicates the session is gone (caller aborts).
 function gone(res) { if (res.status === 401) { toLogin(); return true; } return false; }
 async function apiSend(method, url, body) {
@@ -730,6 +777,7 @@ async function loadMe() {
   if (gone(res)) return;
   const data = await res.json();
   me = data.user; csrfToken = data.csrf_token || "";
+  recoveryLeft = data.recovery_codes_left || 0;
   sessionIdleOn = !!(data.session && data.session.idle_minutes > 0);
   if (sessionIdleOn) { lastTouch = 0; noteActivity(); }
   $("avatar").textContent = (me.username || "?").trim().charAt(0) || "?";
@@ -822,6 +870,7 @@ function escapeModal() {
   if (t === "confirmModal") settleConfirm(false);
   else if (t === "promptModal") settlePrompt(null);
   else if (t === "pwModal") { if (pwForced) return true; closeModal(t); }
+  else if (t === "totpModal" && tfView === "codes") return true;
   else closeModal(t);
   return true;
 }
@@ -1725,6 +1774,274 @@ $("emailBtn").addEventListener("click", setMyEmail);
 $("emCancel").addEventListener("click", () => closeModal("emailModal"));
 $("emSave").addEventListener("click", saveMyEmail);
 $("emCur").addEventListener("keydown", e => { if (e.key === "Enter") saveMyEmail(); });
+/* ---------------- Two-factor authentication (TOTP) ---------------- */
+/* Minimal QR encoder (byte mode, error-correction level M, versions 1-10:
+   up to 213 bytes). Enough for an otpauth:// URI; no dependency needed.
+   Returns an array of rows, each an array of booleans (true = dark). */
+function qrMatrix(text, forceMask) {
+  const data = new TextEncoder().encode(text);
+  // Per version, level M: [total codewords, ec codewords per block,
+  //                        blocks, data codewords in a short block]
+  const SPEC = [null, [26,10,1], [44,16,1], [70,26,1], [100,18,2], [134,24,2],
+                [172,16,4], [196,18,4], [242,22,4], [292,22,5], [346,26,5]];
+  let ver = 0;
+  for (let v = 1; v <= 10; v++) {
+    const [total, ec, blocks] = SPEC[v];
+    const dataCw = total - ec * blocks;
+    const header = 4 + (v < 10 ? 8 : 16);
+    if (header + 8 * data.length <= dataCw * 8) { ver = v; break; }
+  }
+  if (!ver) return null;
+  const [total, ecLen, numBlocks] = SPEC[ver];
+  const dataCw = total - ecLen * numBlocks;
+  const size = ver * 4 + 17;
+
+  // --- bit stream: mode, count, bytes, terminator, pad -------------------
+  const bits = [];
+  const put = (val, n) => { for (let i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4); put(data.length, ver < 10 ? 8 : 16);
+  for (const b of data) put(b, 8);
+  put(0, Math.min(4, dataCw * 8 - bits.length));
+  while (bits.length % 8) bits.push(0);
+  for (let pad = 0xEC; bits.length < dataCw * 8; pad ^= 0xEC ^ 0x11) put(pad, 8);
+  const cw = [];
+  for (let i = 0; i < bits.length; i += 8) cw.push(parseInt(bits.slice(i, i + 8).join(""), 2));
+
+  // --- Reed-Solomon over GF(256), poly 0x11D -----------------------------
+  const mul = (a, b) => { let r = 0; for (let i = 7; i >= 0; i--) { r = (r << 1) ^ ((r >>> 7) * 0x11D); r ^= ((b >>> i) & 1) * a; } return r & 0xFF; };
+  const gen = new Array(ecLen - 1).fill(0).concat([1]);
+  for (let i = 0, root = 1; i < ecLen; i++, root = mul(root, 2))
+    for (let j = 0; j < gen.length; j++) { gen[j] = mul(gen[j], root); if (j + 1 < gen.length) gen[j] ^= gen[j + 1]; }
+  const rs = (msg) => { const r = new Array(ecLen).fill(0); for (const b of msg) { const f = b ^ r.shift(); r.push(0); for (let i = 0; i < r.length; i++) r[i] ^= mul(gen[i], f); } return r; };
+
+  // --- split into blocks, interleave --------------------------------------
+  const shortLen = Math.floor(total / numBlocks), numShort = numBlocks - total % numBlocks;
+  const blocks = [];
+  for (let i = 0, k = 0; i < numBlocks; i++) {
+    const n = shortLen - ecLen + (i < numShort ? 0 : 1);
+    const dat = cw.slice(k, k + n); k += n;
+    const ecc = rs(dat);
+    if (i < numShort) dat.push(0);
+    blocks.push(dat.concat(ecc));
+  }
+  const out = [];
+  for (let i = 0; i < blocks[0].length; i++)
+    for (let j = 0; j < blocks.length; j++)
+      if (i !== shortLen - ecLen || j >= numShort) out.push(blocks[j][i]);
+
+  // --- modules ------------------------------------------------------------
+  const m = Array.from({ length: size }, () => new Array(size).fill(false));
+  const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+  const set = (x, y, dark) => { m[y][x] = dark; fn[y][x] = true; };
+  const finder = (cx, cy) => {
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || y < 0 || x >= size || y >= size) continue;
+      const d = Math.max(Math.abs(dx), Math.abs(dy));
+      set(x, y, d !== 2 && d !== 4);
+    }
+  };
+  finder(3, 3); finder(size - 4, 3); finder(3, size - 4);
+  for (let i = 8; i < size - 8; i++) { set(6, i, i % 2 === 0); set(i, 6, i % 2 === 0); }
+  let align = [];
+  if (ver > 1) {
+    const n = Math.floor(ver / 7) + 2, step = Math.ceil((ver * 4 + 4) / (n * 2 - 2)) * 2;
+    align = [6];
+    for (let p = size - 7; align.length < n; p -= step) align.splice(1, 0, p);
+  }
+  for (const cy of align) for (const cx of align) {
+    const corner = (cx === 6 && cy === 6) || (cx === 6 && cy === size - 7) || (cx === size - 7 && cy === 6);
+    if (corner) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++)
+      set(cx + dx, cy + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  // Reserve format (and version) areas so data placement skips them.
+  for (let i = 0; i < 9; i++) if (i !== 6) { set(i, 8, false); set(8, i, false); }
+  for (let i = 0; i < 8; i++) { set(size - 1 - i, 8, false); set(8, size - 1 - i, false); }
+  if (ver >= 7) for (let i = 0; i < 18; i++) {
+    const a = size - 11 + i % 3, b = Math.floor(i / 3);
+    set(a, b, false); set(b, a, false);
+  }
+  // Data bits, zigzag upward then downward in 2-module columns.
+  let bi = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) for (let j = 0; j < 2; j++) {
+      const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - vert : vert;
+      if (!fn[y][x] && bi < out.length * 8) { m[y][x] = ((out[bi >>> 3] >>> (7 - (bi & 7))) & 1) === 1; bi++; }
+    }
+  }
+  // --- masking: pick the lowest-penalty pattern ---------------------------
+  const MASK = [(x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x, y) => x % 3 === 0,
+                (x, y) => (x + y) % 3 === 0, (x, y) => (Math.floor(y / 2) + Math.floor(x / 3)) % 2 === 0,
+                (x, y) => (x * y) % 2 + (x * y) % 3 === 0, (x, y) => ((x * y) % 2 + (x * y) % 3) % 2 === 0,
+                (x, y) => ((x + y) % 2 + (x * y) % 3) % 2 === 0];
+  const applyMask = (k) => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fn[y][x] && MASK[k](x, y)) m[y][x] = !m[y][x]; };
+  const formatBits = (k) => {
+    const d = (0 << 3) | k;            // level M = 00
+    let rem = d; for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    return ((d << 10) | rem) ^ 0x5412;
+  };
+  const drawFormat = (k) => {
+    const b = formatBits(k), bit = (i) => ((b >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
+    set(8, 7, bit(6)); set(8, 8, bit(7)); set(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
+    set(8, size - 8, true);
+  };
+  const penalty = () => {
+    let p = 0;
+    const runs = (get) => {
+      for (let a = 0; a < size; a++) {
+        let run = 0, last = null, hist = [0, 0, 0, 0, 0, 0, 0];
+        const finderLike = () => hist[1] > 0 && hist[2] === hist[1] && hist[3] === hist[1] * 3 && hist[4] === hist[1] && hist[5] === hist[1] && (hist[0] >= hist[1] * 4 || hist[6] >= hist[1] * 4);
+        for (let b = 0; b <= size; b++) {
+          const v = b < size ? get(a, b) : null;
+          if (v === last && b < size) { run++; continue; }
+          if (last !== null) {
+            if (run >= 5) p += 3 + (run - 5);
+            hist.shift(); hist.push(run);
+            if (last === false && finderLike()) p += 40;
+          }
+          last = v; run = 1;
+        }
+        hist.shift(); hist.push(size); if (finderLike()) p += 40;
+      }
+    };
+    runs((a, b) => m[a][b]); runs((a, b) => m[b][a]);
+    for (let y = 0; y + 1 < size; y++) for (let x = 0; x + 1 < size; x++) {
+      const c = m[y][x]; if (c === m[y][x + 1] && c === m[y + 1][x] && c === m[y + 1][x + 1]) p += 3;
+    }
+    let dark = 0; for (const row of m) for (const v of row) if (v) dark++;
+    p += Math.floor(Math.abs(dark * 20 - size * size * 10) / (size * size)) * 10;
+    return p;
+  };
+  if (ver >= 7) {
+    let rem = ver; for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1F25);
+    const vb = (ver << 12) | rem;
+    for (let i = 0; i < 18; i++) {
+      const a = size - 11 + i % 3, b = Math.floor(i / 3), bit = ((vb >>> i) & 1) === 1;
+      set(a, b, bit); set(b, a, bit);
+    }
+  }
+  let best = forceMask, bestScore = Infinity;
+  if (best === undefined) {
+    for (let k = 0; k < 8; k++) {
+      applyMask(k); drawFormat(k);
+      const s = penalty();
+      if (s < bestScore) { bestScore = s; best = k; }
+      applyMask(k);
+    }
+  }
+  applyMask(best); drawFormat(best);
+  return m;
+}
+
+function drawQr(canvas, text) {
+  const m = qrMatrix(text);
+  const quiet = 4, scale = 4;
+  if (!m) { canvas.width = canvas.height = 0; return false; }
+  const px = (m.length + quiet * 2) * scale;
+  canvas.width = canvas.height = px;
+  canvas.style.width = canvas.style.height = px + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, px, px);
+  ctx.fillStyle = "#000";
+  m.forEach((row, y) => row.forEach((dark, x) => {
+    if (dark) ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);
+  }));
+  return true;
+}
+let tfView = "off";
+function tfShow(view) {
+  tfView = view;
+  ["tfOff", "tfSetup", "tfCodes", "tfOn"].forEach(id => $(id).style.display = "none");
+  $({ off: "tfOff", setup: "tfSetup", codes: "tfCodes", on: "tfOn" }[view]).style.display = "";
+  const p = $("tfPrimary");
+  p.textContent = { off: "Set up", setup: "Enable", codes: "Done", on: "Turn off" }[view];
+  p.classList.toggle("danger", view === "on");
+  $("tfCancel").style.display = view === "codes" ? "none" : "";
+  modalMsg("tfMsg", "");
+}
+function openTotp() {
+  ["tfCur", "tfCode", "tfOffCur", "tfOffCode"].forEach(id => $(id).value = "");
+  if (me && me.totp_enabled) {
+    const n = recoveryLeft;
+    $("tfOnText").textContent = "Two-factor authentication is on for your account. " +
+      (n === 0 ? "You have no recovery codes left — turn it off and set it up again to get new ones. "
+               : `You have ${n} unused recovery code${n === 1 ? "" : "s"}. `) +
+      "To turn it off, confirm your password and a current code.";
+    tfShow("on");
+    openModal("totpModal", $("tfOffCur"));
+  } else {
+    tfShow("off");
+    openModal("totpModal", $("tfCur"));
+  }
+}
+async function tfPost(path, body) {
+  const res = await apiSend("POST", path, body);
+  if (gone(res)) return null;
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    let text = data.error || "Request failed.";
+    if (res.status === 429) {
+      const ra = res.headers.get("Retry-After");
+      if (ra) text += ` Try again in ${Math.ceil(ra / 60)} min.`;
+    }
+    modalMsg("tfMsg", text);
+    return null;
+  }
+  return data;
+}
+async function tfPrimaryAction() {
+  if (tfView === "off") {
+    const cur = $("tfCur").value;
+    if (!cur) return modalMsg("tfMsg", "Enter your current password.");
+    const data = await tfPost("/api/totp/setup", { current_password: cur });
+    if (!data) return;
+    $("tfSecret").textContent = (data.secret || "").replace(/(.{4})/g, "$1 ").trim();
+    if (!drawQr($("tfQr"), data.otpauth || "")) modalMsg("tfMsg", "Could not draw the QR code; use the key below.");
+    tfShow("setup");
+    setTimeout(() => $("tfCode").focus(), 0);
+  } else if (tfView === "setup") {
+    const code = $("tfCode").value.trim();
+    if (!code) return modalMsg("tfMsg", "Enter the 6-digit code from the app.");
+    const data = await tfPost("/api/totp/enable", { code });
+    if (!data) { $("tfCode").select(); return; }
+    $("tfRecovery").textContent = (data.recovery_codes || []).join("\n");
+    $("tfQr").width = $("tfQr").height = 0;   // the secret leaves the page
+    $("tfSecret").textContent = "";
+    tfShow("codes");
+    loadMe();
+  } else if (tfView === "codes") {
+    $("tfRecovery").textContent = "";
+    closeModal("totpModal");
+  } else {
+    const cur = $("tfOffCur").value, code = $("tfOffCode").value.trim();
+    if (!cur || !code) return modalMsg("tfMsg", "Enter your current password and a code.");
+    const data = await tfPost("/api/totp/disable", { current_password: cur, code });
+    if (!data) return;
+    closeModal("totpModal");
+    loadMe();
+  }
+}
+$("totpBtn").addEventListener("click", openTotp);
+$("tfPrimary").addEventListener("click", tfPrimaryAction);
+$("tfCancel").addEventListener("click", () => { $("tfQr").width = 0; $("tfSecret").textContent = ""; closeModal("totpModal"); });
+["tfCur", "tfCode", "tfOffCode"].forEach(id =>
+  $(id).addEventListener("keydown", e => { if (e.key === "Enter") tfPrimaryAction(); }));
+$("tfCopy").addEventListener("click", async () => {
+  const v = $("tfRecovery").textContent;
+  let ok = false;
+  try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(v); ok = true; } }
+  catch (e) { ok = false; }
+  if (!ok) ok = legacyCopy(v);
+  $("tfCopy").textContent = ok ? "Copied" : "Copy failed — select and copy by hand";
+  setTimeout(() => { $("tfCopy").textContent = "Copy"; }, 1800);
+});
 $("pwBtn").addEventListener("click", () => openPw(false));
 $("pwCancel").addEventListener("click", closePw);
 $("pwSave").addEventListener("click", async () => {
@@ -1761,12 +2078,15 @@ async function refreshUsers() {
            <option value="admin"${u.role === "admin" ? " selected" : ""}>admin</option>
          </select>`}</td>
     <td>${u.email ? esc(u.email) : '<span class="sub">no email</span>'}</td>
-    <td>${u.must_change_pw ? '<span class="tag">must change pw</span>' : ""}</td>
+    <td>${u.must_change_pw ? '<span class="tag">must change pw</span> ' : ""}${u.totp_enabled ? '<span class="tag">2FA</span>' : ""}</td>
     <td class="ta-r">
       <button class="linkbtn" data-email="${u.id}" data-cur="${esc(u.email || "")}" data-name="${esc(u.username)}">Email</button>
       ${u.id === me.id ? ' <span class="sub">you</span>'
-        : ` · <button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
+        : (u.totp_enabled ? ` · <button class="linkbtn" data-totp="${u.id}" data-name="${esc(u.username)}">Reset 2FA</button>` : "")
+          + ` · <button class="linkbtn" data-del="${u.id}" data-name="${esc(u.username)}">Delete</button>`}
     </td></tr>`).join("");
+  $("userRows").querySelectorAll("[data-totp]").forEach(b =>
+    b.addEventListener("click", () => resetTotp(b.dataset.totp, b.dataset.name)));
   $("userRows").querySelectorAll("[data-del]").forEach(b =>
     b.addEventListener("click", () => deleteUser(b.dataset.del, b.dataset.name)));
   $("userRows").querySelectorAll("[data-email]").forEach(b =>
@@ -1798,6 +2118,17 @@ async function editEmail(id, current, name) {
   const data = await res.json();
   if (!res.ok) return modalMsg("usersMsg", data.error || "Could not update email.");
   modalMsg("usersMsg", "Email updated.", true);
+  refreshUsers();
+}
+async function resetTotp(id, name) {
+  if (!await confirmDialog("Reset two-factor authentication",
+      `Turn off two-factor authentication for ${name}? They sign in with their password alone until they set it up again. Only do this for someone who lost their authenticator.`,
+      "Reset 2FA", true)) return;
+  const res = await apiSend("POST", "/api/users/totp_reset", { id: Number(id) });
+  if (gone(res)) return;
+  const data = await res.json();
+  if (!res.ok) return modalMsg("usersMsg", data.error || "Reset failed.");
+  modalMsg("usersMsg", `Two-factor authentication is off for ${name}.`, true);
   refreshUsers();
 }
 async function deleteUser(id, name) {

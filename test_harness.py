@@ -2049,6 +2049,288 @@ def main():
     check("proto filter '47' finds GRE",
           [e["proto"] for e in ev] == ["GRE"], str([e["proto"] for e in ev]))
 
+    print("== two-factor authentication (TOTP) ==")
+    import base64 as b64mod
+    # RFC 6238 appendix B vectors (SHA-1, 8 digits; ours keep the last 6).
+    rfc_secret = b64mod.b32encode(b"12345678901234567890").decode()
+    rfc = {59: "94287082", 1111111109: "07081804", 1234567890: "89005924",
+           2000000000: "69279037", 20000000000: "65353130"}
+    check("TOTP matches the RFC 6238 SHA-1 test vectors",
+          all(authmod.totp_code(rfc_secret, t) == v[-6:]
+              for t, v in rfc.items()))
+    check("otpauth URI carries issuer, account, secret and parameters",
+          authmod.otpauth_uri("ABCDEFGH", "a b@c") ==
+          "otpauth://totp/Firewall%20Live%20Log:a%20b%40c?secret=ABCDEFGH"
+          "&issuer=Firewall%20Live%20Log&algorithm=SHA1&digits=6&period=30")
+    # Unit level: the manager's enrolment, replay, recovery and lockout
+    # rules (own DB, so the counts don't leak into the live instance).
+    am3 = authmod.AuthManager(os.path.join(tmp, "totp.db"))
+    tu = am3.create_user("totpuser", "Totp-User-Pass-1")
+    sec, uri = am3.totp_begin(tu)
+    t0 = int(time.time())
+    check("enrolment: secret is 160-bit base32 and the URI embeds it",
+          len(b64mod.b32decode(sec)) == 20 and f"secret={sec}" in uri)
+    try:
+        am3.totp_confirm(tu, "000000", t0)
+        bad = False
+    except authmod.AuthError as e:
+        bad = e.code == 400
+    check("enrolment: a wrong code is refused (400) and 2FA stays off",
+          bad and not am3.get_user_by_id(tu)["totp_enabled"])
+    codes = am3.totp_confirm(tu, authmod.totp_code(sec, t0), t0)
+    check("enrolment: the right code turns 2FA on and mints 8 recovery codes",
+          am3.get_user_by_id(tu)["totp_enabled"] and len(codes) == 8
+          and am3.recovery_codes_left(tu) == 8
+          and all(re.fullmatch(r"[a-z2-9]{5}-[a-z2-9]{5}", c) for c in codes),
+          str(codes))
+    u, err, _ = am3.verify_login("totpuser", "Totp-User-Pass-1", "10.7.7.1")
+    check("password step still verifies and flags totp_enabled",
+          u is not None and u["totp_enabled"] and err is None)
+    ptok = am3.totp_login_begin(tu, "10.7.7.1")
+    try:
+        am3.totp_login_finish(ptok, authmod.totp_code(sec, t0), "10.7.7.1",
+                              t0)
+        replay = False
+    except authmod.AuthError as e:
+        replay = e.code == 401
+    check("the code used to enrol can't be replayed to sign in (step burned)",
+          replay)
+    t1 = t0 + 60
+    u = am3.totp_login_finish(ptok, authmod.totp_code(sec, t1), "10.7.7.1",
+                              t1)
+    check("a fresh code finishes the sign-in", u["username"] == "totpuser")
+    ptok = am3.totp_login_begin(tu, "10.7.7.1")
+    u = am3.totp_login_finish(ptok, authmod.totp_code(sec, t1 + 30),
+                              "10.7.7.1", t1 + 60)
+    check("one step of clock skew is tolerated", u is not None)
+    try:
+        am3.totp_login_finish(am3.totp_login_begin(tu, "10.7.7.1"),
+                              authmod.totp_code(sec, t1 + 30), "10.7.7.1",
+                              t1 + 120)
+        old = False
+    except authmod.AuthError:
+        old = True
+    check("a code from two steps back (and already used) is refused", old)
+    ptok = am3.totp_login_begin(tu, "10.7.7.1")
+    u = am3.totp_login_finish(ptok, codes[0].upper().replace("-", " "),
+                              "10.7.7.1", t1 + 90)
+    check("a recovery code signs in (case/dash-insensitive) and is consumed",
+          u is not None and am3.recovery_codes_left(tu) == 7)
+    try:
+        am3.totp_login_finish(am3.totp_login_begin(tu, "10.7.7.1"), codes[0],
+                              "10.7.7.1", t1 + 120)
+        reused = False
+    except authmod.AuthError as e:
+        reused = e.code == 401
+    check("a used recovery code is refused", reused)
+    # Wrong codes are failed logins: 5 lock the (user, ip) pair, and the
+    # password step must not have cleared that history for a 2FA account.
+    ptok = am3.totp_login_begin(tu, "10.7.7.2")
+    codes_seen = []
+    for i in range(authmod.TOTP_LOGIN_MAX_ATTEMPTS):
+        try:
+            am3.totp_login_finish(ptok, "111111", "10.7.7.2", t1 + 200 + i)
+        except authmod.AuthError as e:
+            codes_seen.append(e.code)
+    _, _, retry = am3.verify_login("totpuser", "Totp-User-Pass-1", "10.7.7.2")
+    check("5 wrong codes -> 401s, then the (user, ip) pair is locked out",
+          codes_seen == [401] * 5 and retry > 0, f"{codes_seen} {retry}")
+    try:
+        am3.totp_login_finish(ptok, authmod.totp_code(sec, t1 + 230),
+                              "10.7.7.2", t1 + 230)
+        dead = None
+    except authmod.AuthError as e:
+        dead = e.code
+    check("the pending sign-in token is dead after the attempt cap", dead in (401, 429), str(dead))
+    u_ok, _, r_ok = am3.verify_login("totpuser", "Totp-User-Pass-1",
+                                     "10.7.7.3")
+    n_fail = am3.db.execute(
+        "SELECT COUNT(*) FROM login_attempts WHERE username = 'totpuser' "
+        "AND success = 0 AND ip = '10.7.7.2'").fetchone()[0]
+    check("password step of a 2FA account does not clear the failure history",
+          u_ok is not None and r_ok == 0 and n_fail == 5, f"{n_fail}")
+    ptok = am3.totp_login_begin(tu, "10.7.7.3", now=t1 + 400)
+    am3.totp_login_finish(ptok, authmod.totp_code(sec, t1 + 400), "10.7.7.3",
+                          t1 + 400)
+    n_fail = am3.db.execute(
+        "SELECT COUNT(*) FROM login_attempts WHERE username = 'totpuser' "
+        "AND success = 0").fetchone()[0]
+    check("a completed second step clears it", n_fail == 0, str(n_fail))
+    try:
+        am3.totp_login_finish(ptok, authmod.totp_code(sec, t1 + 430),
+                              "10.7.7.3", t1 + 430)
+        reuse_tok = False
+    except authmod.AuthError:
+        reuse_tok = True
+    check("a pending token is single-use", reuse_tok)
+    ptok = am3.totp_login_begin(tu, "10.7.7.3")
+    try:
+        am3.totp_login_finish(ptok, authmod.totp_code(sec, t1 + 9999),
+                              "10.7.7.3", t1 + 9999)
+        expired = False
+    except authmod.AuthError as e:
+        expired = "start again" in str(e)
+    check("a pending token expires after 5 minutes", expired)
+    check("verify_totp_code: current code OK, then burned; recovery code OK",
+          am3.verify_totp_code(tu, authmod.totp_code(sec, t1 + 500), t1 + 500)
+          and not am3.verify_totp_code(tu, authmod.totp_code(sec, t1 + 500),
+                                       t1 + 500)
+          and am3.verify_totp_code(tu, codes[1], t1 + 500)
+          and am3.recovery_codes_left(tu) == 6)
+    am3.totp_disable(tu)
+    check("disable clears the secret, the codes and pending sign-ins",
+          not am3.get_user_by_id(tu)["totp_enabled"]
+          and am3.recovery_codes_left(tu) == 0
+          and am3.db.execute("SELECT COUNT(*) FROM totp_logins").fetchone()[0]
+          == 0)
+    check("a pending enrolment that was never confirmed leaves 2FA off",
+          am3.totp_begin(tu)[0] and not am3.get_user_by_id(tu)["totp_enabled"])
+    am3.close()
+
+    # End to end on the live instance: viewer1 turns 2FA on, signs in with
+    # it, an admin resets it. (op2 is viewer1's opener; the reset section
+    # left the password at "Recovered-Viewer-1".)
+    code, lb = op2_json("/api/login", {"username": "viewer1",
+                                       "password": "Recovered-Viewer-1"})
+    v_csrf = lb.get("csrf_token", "")
+    check("viewer1 signs in with password only while 2FA is off",
+          code == 200 and lb.get("ok") and not lb.get("totp_required"),
+          f"{code} {lb}")
+    code, body = op2_json("/api/totp/setup", {"current_password": "nope"},
+                          csrf=v_csrf)
+    check("2FA set-up needs the current password (403)", code == 403,
+          f"{code} {body}")
+    code, body = op2_json("/api/totp/setup",
+                          {"current_password": "Recovered-Viewer-1"},
+                          csrf=v_csrf)
+    v_secret = body.get("secret", "")
+    check("2FA set-up returns the secret and an otpauth URI for viewer1",
+          code == 200 and len(v_secret) == 32
+          and body.get("otpauth", "").startswith(
+              "otpauth://totp/Firewall%20Live%20Log:viewer1?secret=" + v_secret),
+          f"{code} {body}")
+    code, me2 = op2_json("/api/me", None, method="GET")
+    check("2FA is still off until the code confirms it",
+          me2["user"]["totp_enabled"] is False, str(me2))
+    code, body = op2_json("/api/totp/enable", {"code": "123456"}, csrf=v_csrf)
+    check("enable with a wrong code -> 400", code == 400, f"{code} {body}")
+    code, body = op2_json("/api/totp/enable",
+                          {"code": authmod.totp_code(v_secret)}, csrf=v_csrf)
+    v_codes = body.get("recovery_codes", [])
+    code2, me2 = op2_json("/api/me", None, method="GET")
+    check("enable with the right code -> recovery codes; /api/me shows 2FA on "
+          "with 8 codes left",
+          code == 200 and len(v_codes) == 8 and me2["user"]["totp_enabled"]
+          and me2.get("recovery_codes_left") == 8, f"{code} {body} {me2}")
+    code, body = op2_json("/api/totp/setup",
+                          {"current_password": "Recovered-Viewer-1"},
+                          csrf=v_csrf)
+    check("set-up while 2FA is on -> 409", code == 409, str(code))
+    op2_json("/api/logout", None, csrf=v_csrf)
+    cj2.clear()
+    code, lb = op2_json("/api/login", {"username": "viewer1",
+                                       "password": "Recovered-Viewer-1"})
+    pend = lb.get("pending", "")
+    check("login with the password alone now asks for the code and sets no "
+          "session cookie",
+          code == 200 and lb.get("totp_required") and pend
+          and not lb.get("csrf_token") and len(list(cj2)) == 0, f"{code} {lb}")
+    code, _ = op2_json("/api/stats", None, method="GET")
+    check("no access before the second step (401)", code == 401, str(code))
+    code, body = op2_json("/api/login/totp", {"pending": pend,
+                                              "code": "000000"})
+    check("wrong code -> 401", code == 401, f"{code} {body}")
+    code, body = op2_json("/api/login/totp", {"pending": "bogus",
+                                              "code": "000000"})
+    check("unknown pending token -> 401 'start again'",
+          code == 401 and "start again" in body.get("error", ""),
+          f"{code} {body}")
+    code, lb = op2_json("/api/login/totp",
+                        {"pending": pend,
+                         "code": authmod.totp_code(v_secret, time.time() + 30)})
+    v_csrf = lb.get("csrf_token", "")
+    check("right code -> session, csrf token, cookie",
+          code == 200 and lb.get("ok") and v_csrf
+          and any(c.name == "session" for c in cj2), f"{code} {lb}")
+    code, _ = op2_json("/api/stats", None, method="GET")
+    check("the session works", code == 200, str(code))
+    op2_json("/api/logout", None, csrf=v_csrf)
+    cj2.clear()
+    code, lb = op2_json("/api/login", {"username": "viewer1",
+                                       "password": "Recovered-Viewer-1"})
+    code, lb = op2_json("/api/login/totp", {"pending": lb.get("pending", ""),
+                                            "code": v_codes[3]})
+    v_csrf = lb.get("csrf_token", "")
+    code2, me2 = op2_json("/api/me", None, method="GET")
+    check("a recovery code signs in and 7 are left",
+          code == 200 and lb.get("ok") and me2.get("recovery_codes_left") == 7,
+          f"{code} {lb} {me2}")
+    code, body = op2_json("/api/totp/disable",
+                          {"current_password": "Recovered-Viewer-1",
+                           "code": "000000"}, csrf=v_csrf)
+    check("turning 2FA off needs a valid code (403)", code == 403,
+          f"{code} {body}")
+    # Admin side: the Users list shows it; an admin can reset another
+    # user's 2FA but not their own; a non-admin can't reset anyone's.
+    _, ulist, _ = request("GET", "/api/users")
+    by_name = {u["username"]: u for u in ulist.get("users", [])}
+    check("/api/users shows totp_enabled per user",
+          by_name["viewer1"]["totp_enabled"] is True
+          and by_name[ADMIN_USER]["totp_enabled"] is False, str(by_name))
+    code, _ = op2_json("/api/users/totp_reset",
+                       {"id": by_name[ADMIN_USER]["id"]}, csrf=v_csrf)
+    check("non-admin cannot reset anyone's 2FA (403)", code == 403, str(code))
+    code, body, _ = request("POST", "/api/users/totp_reset",
+                           {"id": by_name[ADMIN_USER]["id"]}, csrf=True)
+    check("admin cannot reset their own 2FA this way (400)", code == 400,
+          f"{code} {body}")
+    code, body, _ = request("POST", "/api/users/totp_reset",
+                           {"id": by_name["viewer1"]["id"]}, csrf=True)
+    code2, me2 = op2_json("/api/me", None, method="GET")
+    check("admin resets viewer1's 2FA -> off, no codes left",
+          code == 200 and me2["user"]["totp_enabled"] is False
+          and me2.get("recovery_codes_left") == 0, f"{code} {body} {me2}")
+    code, body = op2_json("/api/totp/disable",
+                          {"current_password": "Recovered-Viewer-1",
+                           "code": v_codes[4]}, csrf=v_csrf)
+    check("disable when 2FA is off -> 409", code == 409, f"{code} {body}")
+    op2_json("/api/logout", None, csrf=v_csrf)
+    cj2.clear()
+    code, lb = op2_json("/api/login", {"username": "viewer1",
+                                       "password": "Recovered-Viewer-1"})
+    check("viewer1 signs in with the password alone again",
+          code == 200 and lb.get("ok") and not lb.get("totp_required"),
+          f"{code} {lb}")
+    op2_json("/api/logout", None, csrf=lb.get("csrf_token", ""))
+    # The user's own path: set up, enable, then turn off with password+code.
+    code, body, _ = request("POST", "/api/totp/setup",
+                           {"current_password": ADMIN_PASS}, csrf=True)
+    a_secret = body.get("secret", "")
+    code, body, _ = request("POST", "/api/totp/enable",
+                           {"code": authmod.totp_code(a_secret)}, csrf=True)
+    a_codes = body.get("recovery_codes", [])
+    code, body, _ = request("POST", "/api/totp/disable",
+                           {"current_password": "wrong-pass-xx",
+                            "code": a_codes[0]}, csrf=True)
+    check("admin: turning 2FA off with a wrong password -> 403 (code not "
+          "consumed)", code == 403 and len(a_codes) == 8, f"{code} {body}")
+    code, body, _ = request("POST", "/api/totp/disable",
+                           {"current_password": ADMIN_PASS,
+                            "code": a_codes[0]}, csrf=True)
+    _, me_now, _ = request("GET", "/api/me")
+    check("admin: password + recovery code turns 2FA off",
+          code == 200 and me_now["user"]["totp_enabled"] is False,
+          f"{code} {body} {me_now}")
+    login_page = urllib.request.urlopen(BASE + "/login", timeout=10) \
+        .read().decode()
+    check("login page carries the second-step form",
+          'id="totpForm"' in login_page and "/api/login/totp" in login_page)
+    index_page = _OPENER.open(urllib.request.Request(BASE + "/"),
+                              timeout=10).read().decode()
+    check("dashboard carries the 2FA dialog and the QR encoder",
+          'id="totpModal"' in index_page and "function qrMatrix" in index_page
+          and "/api/users/totp_reset" in index_page)
+
     print("== graceful stop ==")
     # Queue a batch, then stop inside the flush window: final drain persists it.
     for _ in range(10):
