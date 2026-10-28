@@ -659,10 +659,9 @@ to wipe all accounts and start over.
 - **Reset links** carry the token in the URL fragment
   (`/reset#token=…`), which the browser never sends to the server, so it
   can't show up in proxy or access logs or a `Referer`; the page scrubs
-  it from the address bar once read. Links in the older `?token=` form
-  still work. Changing your **own email** requires your current
-  password (throttled like a login), so a hijacked session can't
-  redirect reset links.
+  it from the address bar once read. Changing your **own email** requires
+  your current password (throttled like a login), so a hijacked session
+  can't redirect reset links.
 - **Two-factor authentication** (optional, per user) is TOTP with recovery
   codes; see above. The shared secret has to be stored in clear (it is what
   the app and the server both compute from), so it lives in `auth.db` like

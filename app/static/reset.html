@@ -87,12 +87,11 @@ const $ = id => document.getElementById(id);
 const form = $("resetForm"), msg = $("msg"), btn = $("submit");
 // The token is read from the URL fragment ("#token=…", which the browser
 // never sends to the server) and only ever sent in the request body — never
-// written into the page, so it can't be reflected as HTML. The query form
-// ("?token=…") of links mailed before v0.4.41 is still accepted; either
-// way the URL is scrubbed right after reading so the token does not stay
-// in the address bar or the browser history.
-const fromHash = new URLSearchParams(location.hash.replace(/^#/, "")).get("token");
-const token = fromHash || new URLSearchParams(location.search).get("token") || "";
+// written into the page, so it can't be reflected as HTML. The URL is
+// scrubbed right after reading so the token does not stay in the address
+// bar or the browser history. (The pre-v0.4.41 "?token=" query form is no
+// longer read: a reset link lives 30 minutes, so none of those remain.)
+const token = new URLSearchParams(location.hash.replace(/^#/, "")).get("token") || "";
 if (token) history.replaceState(null, "", location.pathname);
 function show(text, ok) {
   msg.textContent = text;

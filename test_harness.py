@@ -1188,9 +1188,9 @@ def main():
           token is not None and "/reset?token=" not in text)
     reset_page = urllib.request.urlopen(BASE + "/reset", timeout=10) \
         .read().decode()
-    check("reset page reads the fragment, still accepts the pre-v0.4.41 "
-          "query form, and scrubs the URL",
-          "location.hash" in reset_page and "location.search" in reset_page
+    check("reset page reads the fragment only (query form dropped in "
+          "v0.5.1) and scrubs the URL",
+          "location.hash" in reset_page and "location.search" not in reset_page
           and "history.replaceState" in reset_page)
     check("no email leaked for unknown identifier",
           len(mail_files()) == before + 1, str(len(mail_files())))
