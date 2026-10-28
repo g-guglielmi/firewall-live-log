@@ -687,6 +687,25 @@ class AuthManager:
                                 (user_id,))
             self.db.commit()
 
+    def totp_new_recovery_codes(self, user_id):
+        """Replace the user's recovery codes (used or not) with a fresh set
+        and return them in clear. Only for an account with 2FA on."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT totp_secret FROM users WHERE id = ?",
+                (user_id,)).fetchone()
+            if not row or not row[0]:
+                raise AuthError("two-factor authentication is not on",
+                                code=409)
+            codes = [_recovery_code() for _ in range(RECOVERY_CODE_COUNT)]
+            self.db.execute("DELETE FROM totp_recovery WHERE user_id = ?",
+                            (user_id,))
+            self.db.executemany(
+                "INSERT INTO totp_recovery (user_id, code_hash) VALUES (?,?)",
+                [(user_id, _token_hash(_norm_recovery(c))) for c in codes])
+            self.db.commit()
+        return codes
+
     def recovery_codes_left(self, user_id):
         with self.lock:
             return self.db.execute(

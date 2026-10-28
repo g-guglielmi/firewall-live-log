@@ -559,9 +559,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
       <input id="tfCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" spellcheck="false">
     </div>
     <div id="tfCodes">
-      <div class="sub">Two-factor authentication is now <b>on</b>. Each
-        recovery code below signs you in once if you lose the app. Store them
-        somewhere safe — this is the only time they are shown.</div>
+      <div class="sub" id="tfCodesText"></div>
       <div class="keybox show"><div class="lbl">Recovery codes</div><code id="tfRecovery" class="multi"></code>
         <div class="actions mt10"><button id="tfCopy">Copy</button></div></div>
     </div>
@@ -575,6 +573,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     <div class="msg" id="tfMsg"></div>
     <div class="actions">
       <button id="tfCancel">Cancel</button>
+      <button id="tfRenew">New recovery codes</button>
       <button class="primary" id="tfPrimary">Set up</button>
     </div>
   </div>
@@ -1963,7 +1962,16 @@ function tfShow(view) {
   p.textContent = { off: "Set up", setup: "Enable", codes: "Done", on: "Turn off" }[view];
   p.classList.toggle("danger", view === "on");
   $("tfCancel").style.display = view === "codes" ? "none" : "";
+  $("tfRenew").style.display = view === "on" ? "" : "none";
   modalMsg("tfMsg", "");
+}
+function tfShowCodes(codes, renewed) {
+  $("tfCodesText").innerHTML = (renewed
+    ? "Here are your <b>new</b> recovery codes; the old ones no longer work. "
+    : "Two-factor authentication is now <b>on</b>. ")
+    + "Each code below signs you in once if you lose the app. Store them somewhere safe — this is the only time they are shown.";
+  $("tfRecovery").textContent = (codes || []).join("\n");
+  tfShow("codes");
 }
 function openTotp() {
   ["tfCur", "tfCode", "tfOffCur", "tfOffCode"].forEach(id => $(id).value = "");
@@ -1972,7 +1980,7 @@ function openTotp() {
     $("tfOnText").textContent = "Two-factor authentication is on for your account. " +
       (n === 0 ? "You have no recovery codes left — turn it off and set it up again to get new ones. "
                : `You have ${n} unused recovery code${n === 1 ? "" : "s"}. `) +
-      "To turn it off, confirm your password and a current code.";
+      "To turn it off, or to get a new set of recovery codes, confirm your password and a current code.";
     tfShow("on");
     openModal("totpModal", $("tfOffCur"));
   } else {
@@ -2011,10 +2019,9 @@ async function tfPrimaryAction() {
     if (!code) return modalMsg("tfMsg", "Enter the 6-digit code from the app.");
     const data = await tfPost("/api/totp/enable", { code });
     if (!data) { $("tfCode").select(); return; }
-    $("tfRecovery").textContent = (data.recovery_codes || []).join("\n");
     $("tfQr").width = $("tfQr").height = 0;   // the secret leaves the page
     $("tfSecret").textContent = "";
-    tfShow("codes");
+    tfShowCodes(data.recovery_codes, false);
     loadMe();
   } else if (tfView === "codes") {
     $("tfRecovery").textContent = "";
@@ -2028,6 +2035,16 @@ async function tfPrimaryAction() {
     loadMe();
   }
 }
+async function tfRenewAction() {
+  const cur = $("tfOffCur").value, code = $("tfOffCode").value.trim();
+  if (!cur || !code) return modalMsg("tfMsg", "Enter your current password and a code.");
+  const data = await tfPost("/api/totp/recovery", { current_password: cur, code });
+  if (!data) return;
+  ["tfOffCur", "tfOffCode"].forEach(id => $(id).value = "");
+  tfShowCodes(data.recovery_codes, true);
+  loadMe();
+}
+$("tfRenew").addEventListener("click", tfRenewAction);
 $("totpBtn").addEventListener("click", openTotp);
 $("tfPrimary").addEventListener("click", tfPrimaryAction);
 $("tfCancel").addEventListener("click", () => { $("tfQr").width = 0; $("tfSecret").textContent = ""; closeModal("totpModal"); });

@@ -840,6 +840,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/totp/disable":
                 self._handle_totp_disable(user)
                 return
+            if path == "/api/totp/recovery":
+                self._handle_totp_recovery(user)
+                return
             if path == "/api/api_keys":
                 self._handle_create_api_key(user)
                 return
@@ -1004,21 +1007,40 @@ class Handler(BaseHTTPRequestHandler):
         codes = self.auth.totp_confirm(user["id"], code)   # AuthError 400
         self._json({"ok": True, "recovery_codes": codes})
 
-    def _handle_totp_disable(self, user):
-        body = self._read_json_body()
+    def _second_factor_ok(self, user, body):
+        """Password + a current code (or recovery code): the gate for the
+        actions that weaken or renew 2FA. Answers the request itself and
+        returns False when the gate is shut."""
         if not user.get("totp_enabled"):
             self._json({"error": "two-factor authentication is not on"}, 409)
-            return
+            return False
         if not self._reauth_ok(user, body):
             self._json({"error": "current password is incorrect"}, 403)
-            return
+            return False
         code = body.get("code", "")
         if not isinstance(code, str) or \
                 not self.auth.verify_totp_code(user["id"], code):
             self._json({"error": "that code is not right"}, 403)
+            return False
+        return True
+
+    def _handle_totp_disable(self, user):
+        body = self._read_json_body()
+        if not self._second_factor_ok(user, body):
             return
         self.auth.totp_disable(user["id"])
         self._json({"ok": True})
+
+    def _handle_totp_recovery(self, user):
+        """A fresh set of recovery codes (the old ones stop working), for a
+        user who has used some up or lost the list. Same gate as turning
+        2FA off; the code given may itself be one of the old recovery
+        codes, which is then consumed before the set is replaced."""
+        body = self._read_json_body()
+        if not self._second_factor_ok(user, body):
+            return
+        codes = self.auth.totp_new_recovery_codes(user["id"])
+        self._json({"ok": True, "recovery_codes": codes})
 
     def _handle_admin_totp_reset(self, user):
         """An admin clears 2FA for a user who lost their authenticator. Not

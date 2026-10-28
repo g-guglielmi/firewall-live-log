@@ -612,6 +612,11 @@ failed logins under the same lockout tiers as a wrong password. Turning 2FA
 off needs your password *and* a current code or recovery code, so a
 hijacked session can't strip its own second factor.
 
+**Running low on recovery codes** (or lost the list)? The same dialog has
+**New recovery codes**: confirm your password and a current code (one of
+the remaining recovery codes also works) and you get a fresh set of eight;
+the old ones stop working at once.
+
 **Lost the authenticator?** Use a recovery code, or ask an admin: the Users
 panel has a **Reset 2FA** action for other accounts. An admin can't reset
 their own this way; if the only admin is locked out, `ADMIN_RESET` (next

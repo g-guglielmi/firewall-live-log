@@ -2298,6 +2298,11 @@ def main():
     cj2.clear()
     code, lb = op2_json("/api/login", {"username": "viewer1",
                                        "password": "Recovered-Viewer-1"})
+    rc, rb = op2_json("/api/totp/recovery",
+                      {"current_password": "Recovered-Viewer-1",
+                       "code": "000000"}, csrf=lb.get("csrf_token", ""))
+    check("new recovery codes while 2FA is off -> 409", rc == 409,
+          f"{rc} {rb}")
     check("viewer1 signs in with the password alone again",
           code == 200 and lb.get("ok") and not lb.get("totp_required"),
           f"{code} {lb}")
@@ -2314,9 +2319,30 @@ def main():
                             "code": a_codes[0]}, csrf=True)
     check("admin: turning 2FA off with a wrong password -> 403 (code not "
           "consumed)", code == 403 and len(a_codes) == 8, f"{code} {body}")
+    code, body, _ = request("POST", "/api/totp/recovery",
+                           {"current_password": ADMIN_PASS,
+                            "code": "000000"}, csrf=True)
+    check("admin: new recovery codes need a valid code (403)", code == 403,
+          f"{code} {body}")
+    code, body, _ = request("POST", "/api/totp/recovery",
+                           {"current_password": ADMIN_PASS,
+                            "code": a_codes[1]}, csrf=True)
+    new_codes = body.get("recovery_codes", [])
+    _, me_now, _ = request("GET", "/api/me")
+    check("admin: password + an old recovery code -> 8 fresh codes, all "
+          "unused",
+          code == 200 and len(new_codes) == 8
+          and not set(new_codes) & set(a_codes)
+          and me_now.get("recovery_codes_left") == 8,
+          f"{code} {body} {me_now}")
     code, body, _ = request("POST", "/api/totp/disable",
                            {"current_password": ADMIN_PASS,
                             "code": a_codes[0]}, csrf=True)
+    check("the old recovery codes stop working once replaced (403)",
+          code == 403, f"{code} {body}")
+    code, body, _ = request("POST", "/api/totp/disable",
+                           {"current_password": ADMIN_PASS,
+                            "code": new_codes[0]}, csrf=True)
     _, me_now, _ = request("GET", "/api/me")
     check("admin: password + recovery code turns 2FA off",
           code == 200 and me_now["user"]["totp_enabled"] is False,
