@@ -461,7 +461,11 @@ between live tail and a historical window. Both live and window queries are
 bounded so they stay fast regardless of database size, and the window view
 shows a *querying…* indicator while it loads. A history window shows the
 newest matches first with a **Load older** button to page further back;
-for the *complete* filtered window, use **Download CSV** (uncapped).
+for the *complete* filtered window, use **Download CSV** (uncapped). A
+rare match over a long window (a few rows in a week of traffic) takes as
+long to export as it takes the table to page through it; the rest of the
+dashboard stays usable meanwhile, and cancelling the download stops the
+scan.
 Whenever the visible rows span more than the current day, a date separator
 row marks each day boundary.
 

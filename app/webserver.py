@@ -17,6 +17,8 @@ import json
 import os
 import re
 import secrets
+import select
+import socket
 import sys
 import threading
 import time
@@ -1320,14 +1322,30 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- CSV export ----------------------------------------------------------
     CSV_PAGE = 10_000
+    CSV_SCAN_SPAN = store.WINDOW_SCAN_SPAN
+
+    def _client_gone(self):
+        """True once the client has closed the connection (cancelled the
+        download, closed the tab): the socket turns readable and a peek
+        returns EOF. Lets an abandoned export stop scanning."""
+        sock = getattr(self, "connection", None)
+        if sock is None:
+            return False
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+            return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
 
     def _stream_csv(self, start_ts, end_ts, filters, limit):
         """Write the export page by page instead of materialising up to
         500k rows: each page is one short query under the shared reader lock
         (released between pages, so other API calls interleave) and only one
-        page is ever in memory. The scan cap is off per page — the CSV must
-        be complete — but paging via ``before`` keeps every single query
-        bounded to CSV_PAGE rows."""
+        page is ever in memory. A filtered export uses the same bounded scan
+        as the table — at most CSV_SCAN_SPAN ids per query — so a sparse
+        filter over a long range can't hold the lock for the whole scan and
+        freeze every other request; it keeps going chunk by chunk until the
+        range start, and stops early if the client goes away."""
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Disposition", 'attachment; filename="'
@@ -1344,12 +1362,14 @@ class Handler(BaseHTTPRequestHandler):
             events, more, before = self.state.query(
                 lambda db: store.query_range(db, start_ts, end_ts, filters,
                                              page, before=before,
-                                             scan_span=None))
-            self.wfile.write(_to_csv(events, header=first).encode())
+                                             scan_span=self.CSV_SCAN_SPAN))
+            if events or first:
+                self.wfile.write(_to_csv(events, header=first).encode())
             first = False
             sent += len(events)
-            if not more or not events:
+            if not more or self._client_gone():
                 break
+            time.sleep(0.002)   # let waiting requests take the lock first
 
     def _safe_500(self, e):
         # The detail goes to the container log; the client gets a generic

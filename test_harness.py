@@ -1676,6 +1676,35 @@ def main():
           and sum(1 for l in csv_lines if l.startswith("time,")) == 1
           and calls["n"] >= (want + 6) // 7,
           f"lines={len(csv_lines)} want={want} queries={calls['n']}")
+    # A filtered export walks the range in bounded scan chunks (one short
+    # query each, lock free in between) instead of one query over the whole
+    # range — that single query froze every other request on a big database
+    # — and still returns every match.
+    with sqlite3.connect(f"file:{urllib.request.pathname2url(db_path)}?mode=ro",
+                         uri=True) as rdb:
+        src0 = rdb.execute("SELECT src FROM events ORDER BY id LIMIT 1"
+                           ).fetchone()[0]
+        want_rows = storemod.query_range(rdb, 0, None, {"src": src0}, 10**6,
+                                         scan_span=None)[0]
+    calls["n"] = 0
+    h.wfile, h.CSV_PAGE, h.CSV_SCAN_SPAN = iomod2.BytesIO(), 10_000, 3
+    h._stream_csv(0, None, {"src": src0}, 1000)
+    csv_lines = [l for l in h.wfile.getvalue().decode().splitlines() if l]
+    check("csv export with a text filter scans in bounded chunks and still "
+          "returns every match",
+          len(csv_lines) == len(want_rows) + 1 and calls["n"] > 1
+          and sum(1 for l in csv_lines if l.startswith("time,")) == 1,
+          f"lines={len(csv_lines)} want={len(want_rows)} queries={calls['n']}")
+    import socket as sockmod
+    gone_a, gone_b = sockmod.socketpair()
+    gone_b.close()
+    calls["n"] = 0
+    h.wfile, h.CSV_SCAN_SPAN, h.connection = iomod2.BytesIO(), 1, gone_a
+    h._stream_csv(0, None, {"src": src0}, 1000)
+    gone_a.close()
+    del h.connection
+    check("csv export stops scanning once the client has disconnected",
+          calls["n"] == 1, f"queries={calls['n']}")
     st_unit._db.close() if st_unit._db else None
     try:
         webmod.parse_trusted_proxies("not-an-ip")

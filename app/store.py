@@ -271,8 +271,8 @@ def query_range(db, start_ts, end_ts, filters, limit, before=None,
 
     Returns (events, has_more, next_before): has_more says older matches may
     still exist; pass next_before back as ``before`` to continue the scan.
-    scan_span=None disables the per-request scan cap (CSV export, which
-    cannot page and needs the complete window)."""
+    scan_span=None disables the per-request scan cap (one query then walks the
+    whole range under the reader lock; the CSV export pages with the cap on)."""
     clauses, args = _filter_clauses(filters)
     start_ts = int(start_ts)
     clauses.append("ts >= ?")
