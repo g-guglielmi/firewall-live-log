@@ -339,6 +339,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 .exp-actions { display:flex; gap:12px; justify-content:flex-end; margin-top:8px; }
 .exp-warn { color:var(--critical); }
 .modal .sub.tight { margin:2px 0 0; }
+#expRows .exp-bar { margin:8px 0 2px; max-width:260px; }
 .exp-x { background:none; border:0; padding:0 2px; color:var(--muted); cursor:pointer; font-size:16px; line-height:1; }
 .modal-back.stacked { z-index:70; }   /* confirm / prompt above a management modal */
 .modal .msg { display:none; margin-top:12px; padding:8px 11px; border-radius:9px;
@@ -2632,11 +2633,7 @@ function expRender() {
       + `<div class="exp-actions">${expActions(j, true)}`
       + `<button class="linkbtn" data-exp-all="1">All exports</button></div></div>`;
   }).join("");
-  // Width via CSSOM: the CSP forbids inline style attributes.
-  for (const j of shown) {
-    const bar = panel.querySelector(`[data-exp-bar="${CSS.escape(j.id)}"]`);
-    if (bar) bar.style.width = `${Math.max(2, j.progress * 100)}%`;
-  }
+  expBars(panel);
   if ($("expModal").classList.contains("open")) expRenderList();
 }
 function expRenderList() {
@@ -2650,9 +2647,19 @@ function expRenderList() {
     return `<tr><td><b>${esc(j.filters.device || "all systems")}</b>`
       + `<div class="sub tight">${esc(expWhat(j))}</div>`
       + `<div class="sub tight">started ${esc(fmtWhen(j.created))}</div></td>`
-      + `<td><span class="${warn ? "exp-warn" : ""}">${status}</span></td>`
+      + `<td><span class="${warn ? "exp-warn" : ""}">${status}</span>`
+      + (j.state === "running" ? `<div class="exp-bar"><div data-exp-bar="${esc(j.id)}"></div></div>` : "")
+      + `</td>`
       + `<td class="ta-r nowrap">${expActions(j, false)}</td></tr>`;
   }).join("") : `<tr><td class="sub">No exports. Use <b>Download CSV</b> above a system's log to start one.</td></tr>`;
+  expBars($("expRows"));
+}
+// Progress-bar widths via CSSOM: the CSP forbids inline style attributes.
+function expBars(root) {
+  for (const j of expJobs) {
+    const bar = root.querySelector(`[data-exp-bar="${CSS.escape(j.id)}"]`);
+    if (bar) bar.style.width = `${Math.max(2, j.progress * 100)}%`;
+  }
 }
 async function expPoll() {
   let r;
