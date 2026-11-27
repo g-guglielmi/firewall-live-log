@@ -277,6 +277,8 @@ name — the verdict still wins when a packet on such a rule is blocked.
 | `ADMIN_PASSWORD` | _(generated)_ | Password for the bootstrap admin (also the new password when `ADMIN_RESET=true`). If unset, a random one is printed to the logs once and must be changed at first login. |
 | `ADMIN_RESET` | `false` | On start, reset the `ADMIN_USERNAME` account's password (and clear its lockout) even if users exist — for recovering a forgotten admin password. Unset it again afterwards. |
 | `ADMIN_EMAIL` | _(none)_ | Optional email for the bootstrap admin, so the admin can self-reset too. |
+| `EXPORT_KEEP_HOURS` | `8` | How long finished CSV exports stay downloadable (1–168). |
+| `EXPORT_MAX_GB` | `2` | Disk all stored CSV exports may use together; the oldest finished ones are deleted to make room. |
 | `AUTH_REQUIRE_TOTP` | `off` | Make two-factor authentication mandatory: `admins` (every admin account) or `all` (every account). An affected user who hasn't set it up is taken to the set-up dialog at sign-in and can't reach anything else until it is on; they can't turn it off afterwards. Admins can still **Reset 2FA** for someone who lost their authenticator (that user re-enrols at next sign-in). |
 | `AUTH_FORCE_SECURE_COOKIE` | `false` | Treat every request as HTTPS: `__Host-` session cookie with the `Secure` flag, plus the HSTS header. Otherwise that happens automatically when a **trusted** proxy sends `X-Forwarded-Proto: https`. Never set it on a plain-HTTP deployment (browsers would refuse the cookie). |
 | `TRUSTED_PROXIES` | _(none)_ | Comma-separated IPs/CIDRs of your reverse proxy (e.g. `172.17.0.1` or `192.168.1.10`). Only from these peers are `X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` believed — for per-client lockouts, the automatic `Secure` cookie flag, and the cross-site check. From anyone else they are ignored (logged once per peer) and the real address is used. Direct access from the LAN needs nothing here. |
@@ -477,20 +479,33 @@ searched the slow way until your retention window has passed, after which
 every Rule search is fast. A negated rule (`!…`) or a term that matches more
 than 64 different rule names uses the ordinary search.
 
-**Download CSV** runs in the background. A panel in the bottom-right corner
-shows how far back the search has got (*Searching… 37% · back to 26 Nov
-14:00 · 412 rows found*) with a **Cancel** link, and the file downloads by
-itself when it's ready; the dashboard stays fully usable meanwhile, and a
-reload brings the panel back. A text filter (IP, rule, …) that matches
-rarely has to read every event in the window, so on a busy fleet a week can
-take many minutes; a shorter window is proportionally faster. Results larger
-than 500,000 rows are split into parts of 500,000 (each opens in a
+**Download CSV** queues an export that runs in the background. Exports
+run one at a time, in the order you start them (two at once would only
+compete for the same disk), so you can line up several searches and walk
+away. A panel in the bottom-right corner follows them: *Queued · 2 in
+line*, then how far back the search has got (*Searching… 37% · back to 26
+Nov 14:00 · 412 rows found*), with **Cancel**; the file downloads by itself
+when it's ready if the page is still open. The dashboard stays fully usable
+meanwhile.
+
+**Exports** in the account menu lists all your exports with their status,
+size and how long they're kept: finished files stay downloadable (as often
+as you like) for **8 hours** (`EXPORT_KEEP_HOURS`), also across container
+restarts — an export a restart interrupted, or one still waiting, starts
+again by itself. Together, stored exports use at most **2 GB**
+(`EXPORT_MAX_GB`); when a new one would go over, the oldest finished ones
+are deleted and listed as removed. Each user sees only their own exports;
+at most 10 can wait or run per user.
+
+A text filter (IP, …) that matches rarely and isn't helped by the rule
+index has to read every event in the window, so on a busy fleet a week can
+take many minutes; a shorter window is proportionally faster. Results
+larger than 500,000 rows are split into parts of 500,000 (each opens in a
 spreadsheet) and delivered as one ZIP. An export stops at 5,000,000 rows
-(10 parts): if it gets there, the panel says which time span the files
-cover so you can export the rest with a narrower range. Finished files are
-kept in an `exports/` folder next to the events DB until you close the
-panel entry (a complete download closes itself after 10 seconds) or for 15
-minutes; up to two exports run at once.
+(10 parts): if it gets there, it says which time span the files cover so
+you can export the rest with a narrower range. The files live in an
+`exports/` folder next to the events DB.
+
 Whenever the visible rows span more than the current day, a date separator
 row marks each day boundary.
 
@@ -839,7 +854,7 @@ completely open.
 - **Files are owner-only.** The databases and their WAL/SHM sidecars are
   created `0600` (and existing ones are tightened on start); `layout.json`
   likewise. CSV exports are written into an `exports/` folder that only the
-  app's user can open (`0700`), emptied on every start. The seeded `devices.json` stays `0644` so you can read and edit
+  app's user can open (`0700`) and deleted when they expire. The seeded `devices.json` stays `0644` so you can read and edit
   it from the host.
 - **Supply chain.** The base image is pinned by digest and every GitHub
   Action by commit SHA (Dependabot proposes bumps); the image build applies

@@ -782,7 +782,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/exports":
                 jobs = self.exports.list(user["id"])
-                self._json({"exports": [j.public() for j in jobs]})
+                self._json({"exports": [j.public(pos) for j, pos in jobs],
+                            "keep_hours": self.exports.keep_sec / 3600,
+                            "max_bytes": self.exports.max_bytes,
+                            "stored_bytes": self.exports.stored_bytes()})
                 return
             if path.startswith("/api/exports/"):
                 self._handle_export_get(user, path[len("/api/exports/"):])
@@ -1360,22 +1363,22 @@ class Handler(BaseHTTPRequestHandler):
         except exports_mod.ExportBusy as e:
             self._json({"error": str(e)}, 429)
             return
-        self._json(job.public(), 202)
+        self._json(job.public(self.exports.get(user["id"], job.id)[1]), 202)
 
     def _handle_export_get(self, user, tail):
         job_id, _, what = tail.partition("/")
-        job = self.exports.get(user["id"], job_id)
+        job, pos = self.exports.get(user["id"], job_id)
         if job is None or what not in ("", "file"):
             self._json({"error": "not found"}, 404)
             return
         if what == "":
-            self._json(job.public())
+            self._json(job.public(pos))
             return
-        if job.state != "done" or not job.path:
+        if job.state != "done" or not job.filename:
             self._json({"error": "the export is not ready"}, 409)
             return
         try:
-            f = open(job.path, "rb")
+            f = open(self.exports.path_of(job), "rb")
         except OSError:
             self._json({"error": "the export file is gone"}, 410)
             return
@@ -1394,8 +1397,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             if self.command == "HEAD":
                 return
-            # The file stays until the user closes the export or it expires,
-            # so an interrupted download can be fetched again.
+            # The file stays until the user deletes the export or it
+            # expires, so it can be fetched again.
             shutil.copyfileobj(f, self.wfile, 1 << 20)
 
     # -- CSV export (streamed; API clients) -----------------------------------
@@ -1538,7 +1541,9 @@ class Server(ThreadingHTTPServer):
 
 def serve(state, bind, port, auth_manager=None, auth_enabled=True,
           force_secure_cookie=False, mailer=None, public_url=None,
-          trusted_proxies=(), require_totp="off"):
+          trusted_proxies=(), require_totp="off",
+          export_keep_sec=exports_mod.KEEP_SEC,
+          export_max_bytes=exports_mod.MAX_BYTES):
     Handler.state = state
     Handler.auth = auth_manager
     Handler.auth_enabled = auth_enabled
@@ -1550,8 +1555,7 @@ def serve(state, bind, port, auth_manager=None, auth_enabled=True,
     Handler.exports = exports_mod.ExportManager(
         state.db_path,
         os.path.join(os.path.dirname(state.db_path) or ".", "exports"),
-        _to_csv)
-    Handler.exports.start_sweeper()
+        _to_csv, keep_sec=export_keep_sec, max_bytes=export_max_bytes)
     httpd = Server((bind, port), Handler)
     mode = "enabled" if auth_enabled else "DISABLED"
     reset = "on" if (mailer and mailer.configured and public_url) else "off"

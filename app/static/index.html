@@ -337,6 +337,8 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 .exp-status { color:var(--ink-2); }
 .exp-status.warn { color:var(--critical); }
 .exp-actions { display:flex; gap:12px; justify-content:flex-end; margin-top:8px; }
+.exp-warn { color:var(--critical); }
+.modal .sub.tight { margin:2px 0 0; }
 .exp-x { background:none; border:0; padding:0 2px; color:var(--muted); cursor:pointer; font-size:16px; line-height:1; }
 .modal-back.stacked { z-index:70; }   /* confirm / prompt above a management modal */
 .modal .msg { display:none; margin-top:12px; padding:8px 11px; border-radius:9px;
@@ -369,6 +371,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 .modal.wide { max-width:620px; }
 .modal.narrow { max-width:420px; }
 .ta-r { text-align:right; }
+.nowrap { white-space:nowrap; }
 .dot.act-allow { background:var(--good); }
 .dot.act-block, .dot.act-drop { background:var(--critical); }
 .dot.act-reject { background:var(--serious); }
@@ -401,6 +404,7 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
         <button class="menu-item" id="usersBtn" role="menuitem" data-init-hidden>Manage users</button>
         <button class="menu-item" id="keysBtn" role="menuitem" data-init-hidden>Manage API keys</button>
         <button class="menu-item" id="orgBtn" role="menuitem" data-init-hidden>Organize systems</button>
+        <button class="menu-item" id="expBtn" role="menuitem">Exports</button>
         <button class="menu-item" id="emailBtn" role="menuitem">Set email</button>
         <button class="menu-item" id="pwBtn" role="menuitem">Change password</button>
         <button class="menu-item" id="totpBtn" role="menuitem">Two-factor authentication</button>
@@ -663,6 +667,18 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
     <div class="hint">Use a key with an <code>Authorization: Bearer</code>
       header, e.g.<br>
       <code>curl -H "Authorization: Bearer &lt;key&gt;" &lt;this-site&gt;/api/events.csv?window=86400</code>
+    </div>
+  </div>
+</div>
+
+<!-- Exports modal (every user: their own CSV exports) -->
+<div class="modal-back" id="expModal">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="expTitle">
+    <h3 id="expTitle">Exports</h3>
+    <div class="sub" id="expInfo"></div>
+    <table class="utable"><tbody id="expRows"></tbody></table>
+    <div class="actions">
+      <button id="expClose">Close</button>
     </div>
   </div>
 </div>
@@ -2535,13 +2551,18 @@ fetch("/flags/names.json").then(r => r.ok ? r.json() : {}).then(m => {
 // route, so the pollers only start once /api/me says the account is clear.
 // (After the change the client signs in again and boots fresh.)
 /* ---------------- Background CSV export ----------------
-   Download CSV starts a server-side export job instead of a long-running
-   download: the panel shows how far back it has searched, the dashboard
-   stays fast meanwhile, and the file is fetched once it's ready (split into
-   parts in a ZIP when it's larger than one spreadsheet can hold). */
-const expAutoGet = new Set();   // jobs started from this page: fetch when done
-const expFetched = new Set();   // jobs whose file this page has fetched
-let expTimer = null, expJobs = [];
+   Download CSV queues a server-side export job instead of a long-running
+   download. Jobs run one at a time, in order; the corner panel follows the
+   ones started or watched here (how far back the search has got, then the
+   download), and the Exports dialog (account menu) lists every export of
+   this account with its file, kept for EXPORT_KEEP_HOURS. Results larger
+   than one spreadsheet can hold arrive as parts in a ZIP. */
+const expAutoGet = new Set();   // started from this page: fetch when done
+const expFetched = new Set();   // this page has fetched the file
+const expSeen = new Set();      // seen queued/running here: report the outcome
+const expHidden = new Set();    // closed from the panel (still on the server)
+let expTimer = null, expJobs = [], expMeta = {};
+const EXP_ACTIVE = new Set(["queued", "running"]);
 function expWhen(ts) {
   return new Date(ts * 1000).toLocaleString([], { day: "numeric", month: "short",
     hour: "2-digit", minute: "2-digit" });
@@ -2553,6 +2574,40 @@ function expWhat(j) {
                          : `since ${expWhen(j.start_ts)}`;
   return [range].concat(parts).join(" · ");
 }
+function expLeft(j) {
+  const s = Math.max(0, (j.finished || 0) + (expMeta.keep_hours || 8) * 3600 - Date.now() / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+// [status text (HTML), warn?] for one job.
+function expStatus(j) {
+  if (j.state === "queued")
+    return [j.position === 1 ? "Queued · next to run" : `Queued · ${j.position || "?"} in line`, false];
+  if (j.state === "running") {
+    const back = j.reached_ts ? ` · back to ${esc(expWhen(j.reached_ts))}` : "";
+    return [`Searching… ${Math.floor(j.progress * 100)}%${back} · ${fmt(j.rows)} rows found`, false];
+  }
+  if (j.state === "done") {
+    const files = j.parts > 1 ? ` in ${j.parts} files (ZIP)` : "";
+    let t = `${fmt(j.rows)} rows${files} · ${fmtBytes(j.size)} · kept ${esc(expLeft(j))} more`;
+    if (j.truncated)
+      t += `<br>Reached the ${fmt(j.max_rows)}-row limit: the files cover`
+        + ` ${esc(expWhen(j.oldest_ts))} → ${esc(expWhen(j.newest_ts))}.`
+        + " Export the rest with a narrower range.";
+    return [t, !!j.truncated];
+  }
+  return [esc(j.error || "The export failed."), true];
+}
+function expActions(j, inPanel) {
+  const id = esc(j.id), a = [];
+  if (j.state === "done")
+    a.push(`<button class="linkbtn" data-exp-get="${id}">${expFetched.has(j.id) ? "Download again" : "Download"}</button>`);
+  if (EXP_ACTIVE.has(j.state))
+    a.push(`<button class="linkbtn" data-exp-del="${id}">Cancel</button>`);
+  else if (!inPanel)
+    a.push(`<button class="linkbtn" data-exp-del="${id}">Delete</button>`);
+  return a.join(" ");
+}
 function expFetch(j) {
   expFetched.add(j.id);
   const a = document.createElement("a");
@@ -2562,60 +2617,72 @@ function expFetch(j) {
 }
 function expRender() {
   const panel = $("expPanel");
-  const shown = expJobs;
+  const shown = expJobs.filter(j => !expHidden.has(j.id)
+    && (EXP_ACTIVE.has(j.state) || expSeen.has(j.id)));
   panel.classList.toggle("open", shown.length > 0);
   panel.innerHTML = shown.map(j => {
-    let status, cls = "", actions = "";
-    if (j.state === "running") {
-      const back = j.reached_ts ? ` · back to ${esc(expWhen(j.reached_ts))}` : "";
-      status = `Searching… ${Math.floor(j.progress * 100)}%${back} · ${fmt(j.rows)} rows found`;
-      actions = `<button class="linkbtn" data-exp-cancel="${esc(j.id)}">Cancel</button>`;
-    } else if (j.state === "done") {
-      const files = j.parts > 1 ? ` in ${j.parts} files (ZIP)` : "";
-      status = `${expFetched.has(j.id) ? "Downloaded" : "Ready"}: ${fmt(j.rows)} rows${files}.`;
-      if (j.truncated) {
-        cls = " warn";
-        status += ` Reached the ${fmt(j.max_rows)}-row limit: the files cover`
-          + ` ${esc(expWhen(j.oldest_ts))} → ${esc(expWhen(j.newest_ts))}.`
-          + " Narrow the filters or the time range for the rest.";
-      }
-      actions = `<button class="linkbtn" data-exp-get="${esc(j.id)}">`
-        + `${expFetched.has(j.id) ? "Download again" : "Download"}</button>`;
-    } else {
-      cls = " warn"; status = esc(j.error || "The export failed.");
-    }
+    const [status, warn] = expStatus(j);
+    const done = j.state === "done" && expFetched.has(j.id) ? "Downloaded: " : "";
     return `<div class="exp-item"><div class="exp-head"><div>`
       + `<div class="exp-title">CSV export · ${esc(j.filters.device || "all systems")}</div>`
       + `<div class="exp-what">${esc(expWhat(j))}</div></div>`
-      + `<button class="exp-x" data-exp-close="${esc(j.id)}" title="${j.state === "running" ? "Cancel" : "Close"}" aria-label="Close">×</button></div>`
+      + `<button class="exp-x" data-exp-hide="${esc(j.id)}" title="Hide (keeps the export)" aria-label="Hide">×</button></div>`
       + (j.state === "running" ? `<div class="exp-bar"><div data-exp-bar="${esc(j.id)}"></div></div>` : "")
-      + `<div class="exp-status${cls}">${status}</div>`
-      + `<div class="exp-actions">${actions}</div></div>`;
+      + `<div class="exp-status${warn ? " warn" : ""}">${done}${status}</div>`
+      + `<div class="exp-actions">${expActions(j, true)}`
+      + `<button class="linkbtn" data-exp-all="1">All exports</button></div></div>`;
   }).join("");
   // Width via CSSOM: the CSP forbids inline style attributes.
   for (const j of shown) {
     const bar = panel.querySelector(`[data-exp-bar="${CSS.escape(j.id)}"]`);
     if (bar) bar.style.width = `${Math.max(2, j.progress * 100)}%`;
   }
+  if ($("expModal").classList.contains("open")) expRenderList();
+}
+function expRenderList() {
+  const keep = expMeta.keep_hours || 8;
+  $("expInfo").textContent = `Exports run one at a time, in the order you start them. `
+    + `Finished files stay here for ${keep % 1 ? keep.toFixed(1) : keep} hours, also across restarts; `
+    + `together they may use ${fmtBytes(expMeta.max_bytes || 0)} `
+    + `(${fmtBytes(expMeta.stored_bytes || 0)} now), the oldest make room.`;
+  $("expRows").innerHTML = expJobs.length ? expJobs.map(j => {
+    const [status, warn] = expStatus(j);
+    return `<tr><td><b>${esc(j.filters.device || "all systems")}</b>`
+      + `<div class="sub tight">${esc(expWhat(j))}</div>`
+      + `<div class="sub tight">started ${esc(fmtWhen(j.created))}</div></td>`
+      + `<td><span class="${warn ? "exp-warn" : ""}">${status}</span></td>`
+      + `<td class="ta-r nowrap">${expActions(j, false)}</td></tr>`;
+  }).join("") : `<tr><td class="sub">No exports. Use <b>Download CSV</b> above a system's log to start one.</td></tr>`;
 }
 async function expPoll() {
   let r;
-  try { r = await fetch("/api/exports"); } catch (e) { return; }
-  if (gone(r) || !r.ok) return;
-  expJobs = (await r.json()).exports || [];
+  clearTimeout(expTimer); expTimer = null;
+  try { r = await fetch("/api/exports"); } catch (e) { r = null; }
+  if (r && gone(r)) return;
+  if (!r || !r.ok) {
+    // Server restarting or unreachable: keep trying while exports were
+    // still in progress (the queue resumes on its own after a restart).
+    if (expJobs.some(j => EXP_ACTIVE.has(j.state))) expTimer = setTimeout(expPoll, 5000);
+    return;
+  }
+  const data = await r.json();
+  expJobs = data.exports || []; expMeta = data;
   for (const j of expJobs) {
+    if (EXP_ACTIVE.has(j.state)) expSeen.add(j.id);
     if (j.state === "done" && expAutoGet.has(j.id) && !expFetched.has(j.id)) {
       expAutoGet.delete(j.id); expFetch(j);
-      // A complete export needs no further attention: confirm, then tidy up
-      // (closing also deletes the file on the server). A capped one stays
-      // until closed so its coverage note isn't missed.
-      if (!j.truncated) setTimeout(() => expClose(j.id), 10000);
+      // A complete export needs no further attention here: confirm, then
+      // hide it from the panel (it stays in Exports until it expires). A
+      // capped one stays until closed so its coverage note isn't missed.
+      if (!j.truncated) setTimeout(() => { expHidden.add(j.id); expRender(); }, 10000);
     }
   }
   expRender();
-  const running = expJobs.some(j => j.state === "running");
+  const active = expJobs.some(j => EXP_ACTIVE.has(j.state));
+  const listing = $("expModal").classList.contains("open");
   clearTimeout(expTimer);
-  expTimer = running ? setTimeout(expPoll, 1500) : null;
+  expTimer = active ? setTimeout(expPoll, 1500)
+           : listing ? setTimeout(expPoll, 30000) : null;
 }
 async function expStart(ev) {
   ev.preventDefault();
@@ -2624,24 +2691,42 @@ async function expStart(ev) {
   if (gone(r)) return;
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { showError(new Error(data.error || "could not start the export")); return; }
-  expAutoGet.add(data.id);
+  expAutoGet.add(data.id); expSeen.add(data.id);
   expPoll();
 }
-async function expClose(id) {
+async function expDelete(id) {
+  const j = expJobs.find(x => x.id === id);
+  if (!j) return;
+  const active = EXP_ACTIVE.has(j.state);
+  if (!await confirmDialog(active ? "Cancel export" : "Delete export",
+      active ? "Stop this export? Nothing is kept." : "Delete this export and its file?",
+      active ? "Cancel export" : "Delete", true)) return;
   expAutoGet.delete(id);
-  expJobs = expJobs.filter(j => j.id !== id); expRender();
   const r = await apiSend("DELETE", `/api/exports/${encodeURIComponent(id)}`);
-  gone(r);
+  if (gone(r)) return;
+  expJobs = expJobs.filter(x => x.id !== id); expRender();
+  expPoll();
 }
-$("csvLink").addEventListener("click", expStart);
-$("expPanel").addEventListener("click", ev => {
-  const t = ev.target.closest("[data-exp-cancel],[data-exp-close],[data-exp-get]");
+function openExports() {
+  openModal("expModal", $("expClose"));
+  expRenderList();
+  expPoll();
+}
+function expClick(ev) {
+  const t = ev.target.closest("[data-exp-get],[data-exp-del],[data-exp-hide],[data-exp-all]");
   if (!t) return;
   if (t.dataset.expGet) {
     const j = expJobs.find(x => x.id === t.dataset.expGet);
     if (j) { expFetch(j); expRender(); }
-  } else expClose(t.dataset.expCancel || t.dataset.expClose);
-});
+  } else if (t.dataset.expDel) expDelete(t.dataset.expDel);
+  else if (t.dataset.expHide) { expHidden.add(t.dataset.expHide); expRender(); }
+  else openExports();
+}
+$("csvLink").addEventListener("click", expStart);
+$("expPanel").addEventListener("click", expClick);
+$("expRows").addEventListener("click", expClick);
+$("expBtn").addEventListener("click", openExports);
+$("expClose").addEventListener("click", () => closeModal("expModal"));
 
 function pwGate() { return !!(me && (me.must_change_pw || (me.totp_required && !me.totp_enabled))); }
 (async () => {

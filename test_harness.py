@@ -1142,14 +1142,14 @@ def main():
     code, job, _ = request("POST", "/api/exports",
                            {"query": "window=86400&device=UDM-Test"},
                            csrf=True)
-    check("starting an export answers 202 with a running/done job",
-          code == 202 and job.get("state") in ("running", "done")
+    check("starting an export answers 202 with a queued job",
+          code == 202 and job.get("state") in ("queued", "running", "done")
           and job.get("filters", {}).get("device") == "UDM-Test",
           f"{code} {job}")
     jid = job.get("id", "x")
     for _ in range(100):
         _, job, _ = request("GET", f"/api/exports/{jid}")
-        if job.get("state") != "running":
+        if job.get("state") not in ("queued", "running"):
             break
         time.sleep(0.1)
     with _OPENER.open(urllib.request.Request(
@@ -1167,8 +1167,12 @@ def main():
           and "firewall-log-UDM-Test-" in disp and disp.endswith('.csv"'),
           f"{job} file={len(file_lines)} stream={len(stream_lines)} {disp}")
     _, lst, _ = request("GET", "/api/exports")
-    check("the export is listed for its owner (and stays fetchable)",
-          [j["id"] for j in lst.get("exports", [])] == [jid], str(lst))
+    check("the export is listed for its owner with the keep time and the "
+          "disk cap (and stays fetchable)",
+          [j["id"] for j in lst.get("exports", [])] == [jid]
+          and lst.get("keep_hours") == 8
+          and lst.get("max_bytes") == 2 * 1024 ** 3
+          and lst.get("stored_bytes", 0) > 0, str(lst))
     code, _, _ = request("POST", "/api/exports", {"query": "window=abc"},
                          csrf=True)
     check("an export with a bad range is refused (400)", code == 400,
@@ -1757,22 +1761,36 @@ def main():
     import zipfile as zipmod
     exp_work = os.path.join(os.path.dirname(db_path), "unit-exports")
     os.makedirs(os.path.join(exp_work, "stale"), exist_ok=True)
-    em = expmod.ExportManager(db_path, exp_work, webmod._to_csv, part_rows=3,
-                              max_parts=2, max_running=2, keep_sec=60,
-                              scan_span=4, page=2)
-    check("export manager clears leftovers from a previous run",
-          os.listdir(exp_work) == [], str(os.listdir(exp_work)))
+    os.makedirs(os.path.join(exp_work, "0123456789abcdef"), exist_ok=True)
 
-    def wait_job(j):
-        for _ in range(200):
-            if j.state != "running":
-                return j
-            time.sleep(0.05)
-        return j
-    j = wait_job(em.start(7, 0, None, {"device": None}))
+    def new_em(**kw):
+        opts = dict(part_rows=3, max_parts=2, max_queued=3, keep_sec=60,
+                    scan_span=4, page=2, autostart=False)
+        opts.update(kw)
+        return expmod.ExportManager(db_path, exp_work, webmod._to_csv, **opts)
+    em = new_em()
+    check("export manager removes folders that aren't exports",
+          os.listdir(exp_work) == [], str(os.listdir(exp_work)))
+    j = em.start(7, 0, None, {"device": None})
+    j2 = em.start(7, 0, None, {"src": src0})
+    j3 = em.start(7, int(time.time()) + 3600, None, {})
+    pos = {x.id: p for x, p in em.list(7)}
+    check("exports queue in order (positions 1, 2, 3)",
+          [pos[j.id], pos[j2.id], pos[j3.id]] == [1, 2, 3]
+          and j.state == "queued", str(pos))
+    try:
+        em.start(7, 0, None, {})
+        busy = False
+    except expmod.ExportBusy:
+        busy = True
+    check("a user can't queue more than max_queued exports", busy)
+    check("other users don't see (or remove) someone's exports",
+          em.list(8) == [] and em.get(8, j.id) == (None, None)
+          and not em.remove(8, j.id))
+    em.run_pending()
     names, part_lens = [], []
-    if j.path and j.path.endswith(".zip"):
-        with zipmod.ZipFile(j.path) as z:
+    if j.filename and j.filename.endswith(".zip"):
+        with zipmod.ZipFile(em.path_of(j)) as z:
             names = z.namelist()
             part_lens = [len([l for l in z.read(n).decode().splitlines() if l])
                          for n in names]
@@ -1780,45 +1798,81 @@ def main():
           "at max_parts and flagged as truncated",
           j.state == "done" and j.parts == 2 and j.rows == 6 and j.truncated
           and len(names) == 2 and part_lens == [4, 4]
-          and names[0].endswith("-part01.csv")
+          and names[0].endswith("-part01.csv") and j.size > 0
           and j.oldest_ts <= j.newest_ts,
           f"{j.public()} {names} {part_lens}")
-    em2 = expmod.ExportManager(db_path, exp_work + "-2", webmod._to_csv,
-                               scan_span=4, page=2)
-    j2 = wait_job(em2.start(7, 0, None, {"src": src0}))
-    with open(j2.path, encoding="utf-8") as f:
-        rows2 = [l for l in f.read().splitlines() if l]
-    check("a sparse filter yields one complete CSV (not truncated)",
-          j2.state == "done" and j2.parts == 1 and not j2.truncated
-          and j2.path.endswith(".csv") and len(rows2) == len(want_rows) + 1
-          and j2.rows == len(want_rows) and j2.progress == 1.0,
-          f"{j2.public()} lines={len(rows2)} want={len(want_rows)}")
-    j3 = wait_job(em.start(7, int(time.time()) + 3600, None, {}))
-    with open(j3.path, encoding="utf-8") as f:
-        rows3 = f.read().splitlines()
+    check("the queue ran one export after the other, oldest first",
+          j.started <= j.finished <= j2.started <= j2.finished
+          <= j3.started, f"{j.started} {j2.started} {j3.started}")
     check("an export with no matches is a header-only CSV",
-          j3.state == "done" and j3.rows == 0 and len(rows3) == 1
-          and rows3[0].startswith("time,"), f"{j3.public()} {rows3}")
-    check("jobs are private to their owner",
-          em.get(8, j.id) is None and not em.remove(8, j.id)
-          and [x.id for x in em.list(8)] == []
-          and [x.id for x in em.list(7)] == [j.id, j3.id])
-    em.remove(7, j.id)
-    check("removing a finished export deletes its files",
-          not os.path.exists(os.path.dirname(j.path)) and em.get(7, j.id) is None)
-    em.sweep(now=time.time() + 120)
+          j3.state == "done" and j3.rows == 0 and j3.filename.endswith(".csv"),
+          str(j3.public()))
+    # A sparse filter over the bounded scan: one complete CSV.
+    em2 = expmod.ExportManager(db_path, exp_work + "-2", webmod._to_csv,
+                               scan_span=4, page=2, autostart=False)
+    j4 = em2.start(7, 0, None, {"src": src0})
+    em2.run_pending()
+    with open(em2.path_of(j4), encoding="utf-8") as f:
+        rows4 = [l for l in f.read().splitlines() if l]
+    check("a sparse filter yields one complete CSV (not truncated)",
+          j4.state == "done" and j4.parts == 1 and not j4.truncated
+          and len(rows4) == len(want_rows) + 1
+          and j4.rows == len(want_rows) and j4.progress == 1.0,
+          f"{j4.public()} lines={len(rows4)} want={len(want_rows)}")
+    # Restart: finished exports come back downloadable; a queued one and
+    # one cut off mid-run are queued again from the start.
+    j5 = em.start(7, 0, None, {"src": src0})
+    j6 = em.start(7, 0, None, {"src": src0})
+    j6.state, j6.attempts = "running", 1
+    em._save(j6)
+    with open(os.path.join(exp_work, j6.id, "partial.csv"), "w") as f:
+        f.write("half")
+    em_r = new_em()
+    back = {x.id: x for x, _ in em_r.list(7)}
+    check("after a restart finished exports are still listed and "
+          "downloadable; queued and interrupted ones are queued again",
+          back.get(j.id) and back[j.id].state == "done"
+          and os.path.exists(em_r.path_of(back[j.id]))
+          and back.get(j5.id) and back[j5.id].state == "queued"
+          and back.get(j6.id) and back[j6.id].state == "queued"
+          and not os.path.exists(os.path.join(exp_work, j6.id,
+                                              "partial.csv")),
+          str({k: v.state for k, v in back.items()}))
+    j6r = back[j6.id]
+    j6r.attempts = expmod.MAX_ATTEMPTS
+    em_r._save(j6r)
+    em_r2 = new_em()
+    gave_up = em_r2.get(7, j6.id)[0]
+    check("an export interrupted by repeated restarts is given up "
+          "(failed, not retried forever)",
+          gave_up is not None and gave_up.state == "failed"
+          and "restarts" in (gave_up.error or ""), str(gave_up and
+                                                       gave_up.public()))
+    em_r2.remove(7, j5.id)
+    em_r2.remove(7, j6.id)
+    check("cancelling a queued export deletes its folder",
+          not os.path.exists(os.path.join(exp_work, j5.id)))
+    # Space cap: a finished export pushes the oldest finished ones out.
+    total = sum(x.size for x, _ in em_r2.list(7) if x.state == "done")
+    em_cap = new_em(max_bytes=total)      # exactly full already
+    j7 = em_cap.start(7, 0, None, {"device": None})
+    em_cap.run_pending()
+    after = {x.id: x for x, _ in em_cap.list(7)}
+    check("over the disk cap the oldest finished export makes room (listed "
+          "as removed, file gone); the new one is kept",
+          after[j7.id].state == "done"
+          and after[j.id].state == "removed"
+          and not os.path.exists(os.path.join(exp_work, j.id, j.filename))
+          and "room" in (after[j.id].error or "")
+          and em_cap.stored_bytes() <= total + j7.size - j.size,
+          str({k: v.state for k, v in after.items()}))
+    em_cap.remove(7, j3.id)
+    check("deleting a finished export deletes its files",
+          not os.path.exists(os.path.join(exp_work, j3.id)))
+    em_cap.sweep(now=time.time() + 120)
     check("finished exports expire after keep_sec (files deleted)",
-          em.list(7) == [] and os.listdir(exp_work) == [],
+          em_cap.list(7) == [] and os.listdir(exp_work) == [],
           str(os.listdir(exp_work)))
-    em2.remove(7, j2.id)
-    em0 = expmod.ExportManager(db_path, exp_work, webmod._to_csv,
-                               max_running=0)
-    try:
-        em0.start(7, 0, None, {})
-        busy = False
-    except expmod.ExportBusy:
-        busy = True
-    check("no more than max_running exports run at once", busy)
     st_unit._db.close() if st_unit._db else None
     try:
         webmod.parse_trusted_proxies("not-an-ip")
@@ -2644,6 +2698,14 @@ def main():
     check("an invalid AUTH_REQUIRE_TOTP value refuses to start (exit 2)",
           pr_bad.returncode == 2 and "AUTH_REQUIRE_TOTP" in pr_bad.stdout,
           f"rc={pr_bad.returncode} {pr_bad.stdout[-200:]}")
+    for name, val in (("EXPORT_KEEP_HOURS", "0"), ("EXPORT_MAX_GB", "lots")):
+        e_x = dict(e_bad, AUTH_REQUIRE_TOTP="off", **{name: val})
+        pr_x = subprocess.run([sys.executable, "-u", MAIN], env=e_x,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=30)
+        check(f"an invalid {name} refuses to start (exit 2)",
+              pr_x.returncode == 2 and name in pr_x.stdout,
+              f"rc={pr_x.returncode} {pr_x.stdout[-200:]}")
     e_req = dict(e_bad, AUTH_REQUIRE_TOTP="admins")
     pr_req = subprocess.Popen([sys.executable, "-u", MAIN], env=e_req,
                               stdout=subprocess.PIPE,

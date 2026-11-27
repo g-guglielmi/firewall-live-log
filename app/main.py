@@ -25,6 +25,8 @@ Configuration:
   MAX_EVENTS       row-count safety cap, 0=off (overrides config)
   PRUNE_INTERVAL_SEC  retention sweep period (default 3600)
   QUEUE_MAX        max in-flight events before drop (default 100000)
+  EXPORT_KEEP_HOURS  how long finished CSV exports stay downloadable (8)
+  EXPORT_MAX_GB    disk all stored exports may use together (2)
 
 Per-device vendor is auto|unifi|sophos (see devices.json).
 """
@@ -68,6 +70,23 @@ def _require_totp(value):
     print(f"[web] AUTH_REQUIRE_TOTP={value!r} is not valid: use off, "
           "admins or all", file=sys.stderr)
     sys.exit(2)
+
+
+def _env_number(name, default, lo, hi, unit):
+    """A positive number setting (EXPORT_KEEP_HOURS, EXPORT_MAX_GB); out of
+    range or not a number is a configuration error (exit 2)."""
+    raw = env(name)
+    if raw is None:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        v = None
+    if v is None or not (lo <= v <= hi):
+        print(f"[web] {name}={raw!r} is not valid: use a number of {unit} "
+              f"from {lo:g} to {hi:g}", file=sys.stderr)
+        sys.exit(2)
+    return v
 
 
 def env_bool(name, default=False):
@@ -261,6 +280,8 @@ def main():
     auth_enabled = env_bool("AUTH_ENABLED", True)
     force_secure = env_bool("AUTH_FORCE_SECURE_COOKIE", False)
     require_totp = _require_totp(env("AUTH_REQUIRE_TOTP"))
+    export_keep_h = _env_number("EXPORT_KEEP_HOURS", 8, 1, 168, "hours")
+    export_max_gb = _env_number("EXPORT_MAX_GB", 2, 0.1, 1000, "GB")
     try:
         trusted_proxies = webserver.parse_trusted_proxies(env("TRUSTED_PROXIES"))
         src_nets, src_hosts = sources_mod.parse(env("SYSLOG_ALLOWED_SOURCES"))
@@ -364,7 +385,9 @@ def main():
                             force_secure_cookie=force_secure,
                             mailer=mailer, public_url=public_url,
                             trusted_proxies=trusted_proxies,
-                            require_totp=require_totp)
+                            require_totp=require_totp,
+                            export_keep_sec=int(export_keep_h * 3600),
+                            export_max_bytes=int(export_max_gb * 1024 ** 3))
     threading.Thread(target=httpd.serve_forever, name="web",
                      daemon=True).start()
 
