@@ -466,6 +466,17 @@ shows a *querying…* indicator while it loads. A history window shows the
 newest matches first with a **Load older** button to page further back;
 for the *complete* filtered window, use **Download CSV**.
 
+**The Rule filter is indexed.** A Rule term (optionally combined with
+Source/Destination IP, port, action…) walks only the events of the matching
+rules instead of every event in the window, so a rare match over days of
+traffic is found in seconds; IP terms are checked inside the index too. The
+index costs about a third more disk (≈44 bytes per event) and starts empty
+when you upgrade to v0.5.6 — it is never back-filled, so the upgrade is
+instant and no syslog is lost: history from before the upgrade is still
+searched the slow way until your retention window has passed, after which
+every Rule search is fast. A negated rule (`!…`) or a term that matches more
+than 64 different rule names uses the ordinary search.
+
 **Download CSV** runs in the background. A panel in the bottom-right corner
 shows how far back the search has got (*Searching… 37% · back to 26 Nov
 14:00 · 412 rows found*) with a **Cancel** link, and the file downloads by

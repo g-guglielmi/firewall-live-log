@@ -2035,6 +2035,112 @@ def main():
         storemod.LIVE_SCAN_CAP = saved_cap
         rb.close(); wb.close()
 
+    print("== rule index ==")
+    import random as rndmod
+    idb = os.path.join(tmp, "ruleix.db")
+    wi = storemod.open_writer(idb)
+    # History written before the index existed (an upgrade: the trigger
+    # starts covering at that point, nothing is back-filled).
+    wi.execute("DROP TRIGGER events_rule_ix")
+    wi.execute("DELETE FROM meta WHERE key = 'rule_ix_from'")
+    wi.commit()
+    rng = rndmod.Random(7)
+    base_ts = int(time.time()) - 3 * 86400
+
+    def ix_rows(n, t0):
+        out = []
+        for i in range(n):
+            dev = ("FW-A", "FW-B")[i % 2]
+            rule = rng.choice(["Any to Any - Mercur", "LAN out", "LAN in",
+                               "Drop all", "100%_rule"])
+            src = rng.choice(["10.110.0.22", "10.30.15.200", "192.168.1.5",
+                              "10.110.9.9"])
+            dst = rng.choice(["10.110.0.16", "8.8.8.8", "10.30.15.1"])
+            out.append((t0 + i * 60, dev, "sophos", src, dst, "UDP",
+                        rng.choice([53, 443, 47810]),
+                        rng.choice(["Allow", "Drop"]), rule))
+        return out
+    storemod.insert_events(wi, ix_rows(300, base_ts))
+    wi.commit()
+    storemod._ensure_rule_index(wi)
+    ix_from = int(storemod.meta_get(wi, "rule_ix_from"))
+    storemod.insert_events(wi, ix_rows(300, base_ts + 300 * 60))
+    # An older app version (no idea about rule_ix) writing to the same file:
+    # the trigger still indexes its rows.
+    wi.executemany(storemod.INSERT_EVENT, ix_rows(50, base_ts + 600 * 60))
+    wi.commit()
+    n_ix = wi.execute("SELECT COUNT(*) FROM rule_ix").fetchone()[0]
+    check("the rule index starts at upgrade time and covers every later "
+          "insert (no back-fill of older history)",
+          ix_from == 301 and n_ix == 350, f"from={ix_from} entries={n_ix}")
+    ri = storemod.open_reader(idb)
+    saved_ix = (storemod.RULE_IX_SPAN, storemod.RULE_IX_CANDIDATES)
+
+    def page_all(f, use, start=0, end=None, limit=7):
+        got, before = [], None
+        for _ in range(2000):
+            ev, more, before = storemod.query_range(
+                ri, start, end, f, limit, before=before, use_rule_index=use)
+            got += [e["id"] for e in ev]
+            if not more:
+                return got
+        return None
+    try:
+        storemod.RULE_IX_SPAN, storemod.RULE_IX_CANDIDATES = 40, 5
+        mid = base_ts + 450 * 60
+        cases = [{"rule": "Mercur"}, {"rule": "mercur", "device": "FW-A"},
+                 {"rule": "Mercur", "src": "10.110"},
+                 {"rule": "LAN", "dst": "8.8.8.8", "action": "Allow"},
+                 {"rule": "Mercur", "ip": "10.110.0.22", "port": "=443"},
+                 {"rule": "Mercur", "src": "!10.110"},
+                 {"rule": "100%_"}, {"rule": "!Mercur"},
+                 {"rule": "no such rule"}]
+        bad = []
+        for f in cases:
+            for (s0, e0) in ((0, None), (base_ts + 100 * 60, mid),
+                             (mid, None)):
+                want = page_all(f, False, s0, e0)
+                got = page_all(f, True, s0, e0)
+                if got != want or got is None:
+                    bad.append((f, s0, e0, len(want or []), len(got or [])))
+        check("rule-filtered results through the index are identical to the "
+              "full scan (paging, ranges, IP/port/action combos, history "
+              "before the index, negations)", not bad, str(bad[:3]))
+        plan = storemod._rule_index_plan(ri, {"rule": "Mercur",
+                                              "device": "FW-A"})
+        check("a rule term resolves to its (device, rule) keys",
+              plan is not None and len(plan[0]) == 1 and plan[1] == ix_from,
+              str(plan))
+        saved_keys = storemod.RULE_IX_MAX_KEYS
+        storemod.RULE_IX_MAX_KEYS = 1
+        broad = storemod._rule_index_plan(ri, {"rule": "LAN"})
+        storemod.RULE_IX_MAX_KEYS = saved_keys
+        check("a rule term matching too many rules falls back to the scan",
+              broad is None and storemod._rule_index_plan(
+                  ri, {"rule": "!LAN"}) is None, str(broad))
+    finally:
+        storemod.RULE_IX_SPAN, storemod.RULE_IX_CANDIDATES = saved_ix
+    # Retention: entries of deleted events go, names with no entries go.
+    wi.execute("UPDATE events SET ts = 1 WHERE id <= 400")
+    wi.commit()
+    storemod.prune(wi, 14, 0)
+    lo = wi.execute("SELECT MIN(id) FROM events").fetchone()[0]
+    stale = wi.execute("SELECT COUNT(*) FROM rule_ix WHERE id < ?",
+                       (lo,)).fetchone()[0]
+    left = wi.execute("SELECT COUNT(*) FROM rule_ix").fetchone()[0]
+    names = wi.execute("SELECT COUNT(*) FROM rule_names").fetchone()[0]
+    want_names = wi.execute("SELECT COUNT(*) FROM (SELECT DISTINCT device, "
+                            "rule FROM events)").fetchone()[0]
+    check("prune drops index entries of deleted events and unused names",
+          lo == 401 and stale == 0 and left == 250
+          and names == want_names,
+          f"lo={lo} stale={stale} left={left} names={names}/{want_names}")
+    ri.close(); wi.close()
+    wi = storemod.open_writer(idb)
+    check("reopening keeps the coverage start (no reset on restart)",
+          int(storemod.meta_get(wi, "rule_ix_from")) == ix_from)
+    wi.close()
+
     print("== retention prune ==")
     # Insert an event well outside the window, then wait for a prune sweep
     # (PRUNE_INTERVAL_SEC=2). A concurrent short-lived writer is fine in WAL.

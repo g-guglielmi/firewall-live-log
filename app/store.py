@@ -6,6 +6,7 @@ Concurrency model: a single writer thread owns the read-write connection
 connection guarded by a lock.  WAL mode lets reads proceed during writes.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -56,7 +57,80 @@ def open_writer(path):
     db.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)",
                (SCHEMA_VERSION,))
     db.commit()
+    _ensure_rule_index(db)
     return db
+
+
+# --------------------------------------------------------------------------
+# Rule index
+# --------------------------------------------------------------------------
+# A substring filter can't use an index, so a rare match over a long window
+# means reading every event in it. Rule names, though, are few: rule_names
+# maps each (device, rule) pair to a small key, and rule_ix lists, per key,
+# the ids of its events together with their src/dst — so a rule filter
+# (optionally with an IP filter) walks only its own entries instead of the
+# whole table, and fetches just the matching rows.
+#
+# rule_ix is filled by a trigger, so every writer keeps it complete —
+# including an older version of the app run against this database after a
+# downgrade. It covers events from meta 'rule_ix_from' on: the trigger is
+# added to an existing database without back-filling its history (that
+# would read the whole file while ingestion waits); older events are still
+# found by the ordinary scan, and once retention has aged them out the index
+# covers everything.
+_RULE_IX_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS rule_names (
+        key    INTEGER PRIMARY KEY,
+        device TEXT NOT NULL,
+        rule   TEXT NOT NULL,
+        UNIQUE (device, rule)
+    );
+    CREATE TABLE IF NOT EXISTS rule_ix (
+        rule_key INTEGER NOT NULL,
+        id       INTEGER NOT NULL,
+        src      TEXT    NOT NULL,
+        dst      TEXT    NOT NULL,
+        PRIMARY KEY (rule_key, id)
+    ) WITHOUT ROWID;
+"""
+_RULE_IX_TRIGGER = """
+    CREATE TRIGGER events_rule_ix AFTER INSERT ON events BEGIN
+        INSERT OR IGNORE INTO rule_names (device, rule)
+            VALUES (NEW.device, NEW.rule);
+        INSERT INTO rule_ix (rule_key, id, src, dst)
+            SELECT key, NEW.id, NEW.src, NEW.dst FROM rule_names
+            WHERE device = NEW.device AND rule = NEW.rule;
+    END
+"""
+
+
+def _ensure_rule_index(db):
+    db.executescript(_RULE_IX_SCHEMA)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+                  "AND name = 'events_rule_ix'").fetchone():
+        return
+    # Trigger and coverage start in one transaction: no event can slip in
+    # between them unindexed.
+    db.execute("BEGIN IMMEDIATE")
+    db.execute(_RULE_IX_TRIGGER)
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('rule_ix_from', "
+               "(SELECT COALESCE(MAX(id), 0) + 1 FROM events))")
+    db.commit()
+
+
+def _prune_rule_index(db):
+    """Drop index entries whose events are gone (retention / row cap), one
+    key range at a time, then forget rule names with no entries left."""
+    lo = db.execute("SELECT MIN(id) FROM events").fetchone()[0]
+    if lo is None:
+        db.execute("DELETE FROM rule_ix")
+    else:
+        keys = [r[0] for r in db.execute("SELECT key FROM rule_names")]
+        for k in keys:
+            db.execute("DELETE FROM rule_ix WHERE rule_key = ? AND id < ?",
+                       (k, lo))
+    db.execute("DELETE FROM rule_names WHERE NOT EXISTS "
+               "(SELECT 1 FROM rule_ix WHERE rule_key = rule_names.key)")
 
 
 def open_reader(path):
@@ -114,6 +188,7 @@ def prune(db, retention_days, max_events, unparsed_cap=10000):
     db.execute("DELETE FROM unparsed WHERE id <= "
                "COALESCE((SELECT MAX(id) FROM unparsed), 0) - ?",
                (unparsed_cap,))
+    _prune_rule_index(db)
     db.commit()
     db.execute("PRAGMA incremental_vacuum")
     db.commit()
@@ -262,8 +337,80 @@ def query_live(db, since, filters, limit):
 WINDOW_SCAN_SPAN = 1_000_000
 
 
+# Rule-index reads: at most RULE_IX_SPAN ids of index entries and
+# RULE_IX_CANDIDATES matching rows are examined per request (same paging
+# contract as the scan cap), and a rule term matching more than
+# RULE_IX_MAX_KEYS (device, rule) pairs falls back to the scan.
+RULE_IX_SPAN = 5_000_000
+RULE_IX_CANDIDATES = 5_000
+RULE_IX_MAX_KEYS = 64
+
+
+def _rule_index_plan(db, filters):
+    """(keys, covered_from) when the rule index can serve these filters,
+    else None: a positive rule term on a database that has the index."""
+    rule = filters.get("rule")
+    if not rule or str(rule).startswith("!"):
+        return None
+    try:
+        row = db.execute("SELECT value FROM meta "
+                         "WHERE key = 'rule_ix_from'").fetchone()
+        if not row:
+            return None
+        sql = f"SELECT key FROM rule_names WHERE rule LIKE ?{_LIKE_ESCAPE}"
+        args = [_like(rule)]
+        if filters.get("device"):
+            sql += " AND device = ?"
+            args.append(filters["device"])
+        keys = [r[0] for r in db.execute(sql + " LIMIT ?",
+                                         args + [RULE_IX_MAX_KEYS + 1])]
+    except sqlite3.OperationalError:     # database without the index tables
+        return None
+    if len(keys) > RULE_IX_MAX_KEYS:
+        return None
+    return keys, int(row[0])
+
+
+def _query_rule_index(db, plan, clauses, args, filters, limit, top, range_lo):
+    """One bounded step of a rule-filtered query through rule_ix, over the
+    ids below ``top`` that the index covers. Same return contract as
+    query_range."""
+    keys, ix_from = plan
+    lower = max(range_lo, ix_from)
+    window_lo = max(lower, top - RULE_IX_SPAN)
+    # IP terms are checked on the index entries themselves (they carry
+    # src/dst), so a rare IP inside a busy rule never touches the table.
+    ip_clauses, ip_args = _filter_clauses(
+        {k: filters.get(k) for k in ("ip", "src", "dst")})
+    ip_where = "".join(" AND " + c for c in ip_clauses)
+    cand = []
+    if keys:
+        one = ("SELECT id FROM (SELECT id FROM rule_ix WHERE rule_key = ? "
+               f"AND id >= ? AND id < ?{ip_where} ORDER BY id DESC LIMIT ?)")
+        cargs = []
+        for k in keys:
+            cargs += [k, window_lo, top] + ip_args + [RULE_IX_CANDIDATES]
+        cand = [r[0] for r in db.execute(
+            " UNION ALL ".join([one] * len(keys))
+            + " ORDER BY id DESC LIMIT ?", cargs + [RULE_IX_CANDIDATES])]
+    rows = []
+    if cand:
+        where = " AND ".join(clauses + ["id IN (SELECT value FROM json_each(?))"])
+        rows = db.execute(f"{_SELECT} WHERE {where} ORDER BY id DESC LIMIT ?",
+                          args + [json.dumps(cand), limit]).fetchall()
+    if len(rows) >= limit:
+        return _rows_to_dicts(rows), True, rows[-1][0]
+    if len(cand) >= RULE_IX_CANDIDATES:
+        return _rows_to_dicts(rows), True, cand[-1]
+    if window_lo > max(range_lo, 1):
+        # More indexed ids below, or the not-yet-indexed history (the next
+        # request continues there with the ordinary scan).
+        return _rows_to_dicts(rows), True, window_lo
+    return _rows_to_dicts(rows), False, None
+
+
 def query_range(db, start_ts, end_ts, filters, limit, before=None,
-                scan_span=WINDOW_SCAN_SPAN):
+                scan_span=WINDOW_SCAN_SPAN, use_rule_index=True):
     """Historical snapshot of matching events with start_ts <= ts (and, when
     end_ts is not None, ts <= end_ts), newest-first. ``before`` pages backward
     — only events with id < before, so the client can load successively older
@@ -303,6 +450,14 @@ def query_range(db, start_ts, end_ts, filters, limit, before=None,
             hi = rowc[0] + WINDOW_ID_MARGIN
             clauses.append("id <= ?")
             args.append(hi)
+    plan = _rule_index_plan(db, filters) if (use_rule_index and row) else None
+    if plan is not None:
+        top = before if (before and before > 0) else (
+            hi + 1 if hi is not None else db.execute(
+                "SELECT COALESCE(MAX(id),0)+1 FROM events").fetchone()[0])
+        if top > max(range_lo, plan[1]):     # part of what's left is indexed
+            return _query_rule_index(db, plan, clauses, args, filters, limit,
+                                     top, range_lo)
     # Bounded scan for filtered pages: examine at most scan_span ids below the
     # scan's starting point per request.
     floor, scanned_lo = range_lo, None
