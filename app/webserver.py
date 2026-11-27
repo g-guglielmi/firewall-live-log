@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import select
+import shutil
 import socket
 import sys
 import threading
@@ -26,6 +27,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import auth as auth_mod
+import exports as exports_mod
 import geo as geo_mod
 import mailer as mailer_mod
 import store
@@ -778,6 +780,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"events": geo_mod.annotate(events),
                             "has_more": has_more, "next_before": next_before})
                 return
+            if path == "/api/exports":
+                jobs = self.exports.list(user["id"])
+                self._json({"exports": [j.public() for j in jobs]})
+                return
+            if path.startswith("/api/exports/"):
+                self._handle_export_get(user, path[len("/api/exports/"):])
+                return
             if path == "/api/events.csv":
                 try:
                     start_ts, end_ts = _range_from(params, 86400)
@@ -840,6 +849,9 @@ class Handler(BaseHTTPRequestHandler):
                 if self.auth_enabled:
                     self.auth.touch_session(self._cookie_token())
                 self._json({"ok": True})
+                return
+            if path == "/api/exports":
+                self._handle_export_start(user)
                 return
             if path == "/api/change_password":
                 self._handle_change_password(user)
@@ -910,6 +922,13 @@ class Handler(BaseHTTPRequestHandler):
             if self._password_change_pending(user, path):
                 return
             if self._second_factor_pending(user, path):
+                return
+            if path.startswith("/api/exports/"):
+                if self.exports.remove(user["id"],
+                                       path[len("/api/exports/"):]):
+                    self._json({"ok": True})
+                else:
+                    self._json({"error": "not found"}, 404)
                 return
             kprefix = "/api/api_keys/"
             if path.startswith(kprefix):
@@ -1320,7 +1339,66 @@ class Handler(BaseHTTPRequestHandler):
             ip=self._client_ip())
         self._json({"ok": True})
 
-    # -- CSV export ----------------------------------------------------------
+    # -- Background export (dashboard Download CSV) ---------------------------
+    def _handle_export_start(self, user):
+        """Start a background export of the filters/range in ``query`` (the
+        same query string /api/events.csv takes)."""
+        body = self._read_json_body()
+        query = body.get("query", "")
+        if not isinstance(query, str) or len(query) > 4096:
+            self._json({"error": "query must be a string"}, 400)
+            return
+        params = urllib.parse.parse_qs(query)
+        try:
+            start_ts, end_ts = _range_from(params, 86400)
+            filters = _filters_from(params)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        try:
+            job = self.exports.start(user["id"], start_ts, end_ts, filters)
+        except exports_mod.ExportBusy as e:
+            self._json({"error": str(e)}, 429)
+            return
+        self._json(job.public(), 202)
+
+    def _handle_export_get(self, user, tail):
+        job_id, _, what = tail.partition("/")
+        job = self.exports.get(user["id"], job_id)
+        if job is None or what not in ("", "file"):
+            self._json({"error": "not found"}, 404)
+            return
+        if what == "":
+            self._json(job.public())
+            return
+        if job.state != "done" or not job.path:
+            self._json({"error": "the export is not ready"}, 409)
+            return
+        try:
+            f = open(job.path, "rb")
+        except OSError:
+            self._json({"error": "the export file is gone"}, 410)
+            return
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "application/zip" if job.filename.endswith(".zip")
+                             else "text/csv; charset=utf-8")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{job.filename}"')
+            self.send_header("Cache-Control", "no-store")
+            for k, v in self._security_headers().items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            # The file stays until the user closes the export or it expires,
+            # so an interrupted download can be fetched again.
+            shutil.copyfileobj(f, self.wfile, 1 << 20)
+
+    # -- CSV export (streamed; API clients) -----------------------------------
     CSV_PAGE = 10_000
     CSV_SCAN_SPAN = store.WINDOW_SCAN_SPAN
 
@@ -1469,6 +1547,11 @@ def serve(state, bind, port, auth_manager=None, auth_enabled=True,
     Handler.mailer = mailer
     Handler.public_url = public_url
     Handler.trusted_proxies = tuple(trusted_proxies)
+    Handler.exports = exports_mod.ExportManager(
+        state.db_path,
+        os.path.join(os.path.dirname(state.db_path) or ".", "exports"),
+        _to_csv)
+    Handler.exports.start_sweeper()
     httpd = Server((bind, port), Handler)
     mode = "enabled" if auth_enabled else "DISABLED"
     reset = "on" if (mailer and mailer.configured and public_url) else "off"

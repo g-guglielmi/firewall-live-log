@@ -1138,6 +1138,53 @@ def main():
           len(lines) - 1 == len(ev_all.get("events", [])),
           f"csv={len(lines) - 1} json={len(ev_all.get('events', []))}")
 
+    print("== background CSV export ==")
+    code, job, _ = request("POST", "/api/exports",
+                           {"query": "window=86400&device=UDM-Test"},
+                           csrf=True)
+    check("starting an export answers 202 with a running/done job",
+          code == 202 and job.get("state") in ("running", "done")
+          and job.get("filters", {}).get("device") == "UDM-Test",
+          f"{code} {job}")
+    jid = job.get("id", "x")
+    for _ in range(100):
+        _, job, _ = request("GET", f"/api/exports/{jid}")
+        if job.get("state") != "running":
+            break
+        time.sleep(0.1)
+    with _OPENER.open(urllib.request.Request(
+            BASE + "/api/events.csv?window=86400&device=UDM-Test&limit=500000"),
+            timeout=10) as r:
+        stream_lines = [l for l in r.read().decode().splitlines() if l]
+    with _OPENER.open(urllib.request.Request(
+            BASE + f"/api/exports/{jid}/file"), timeout=10) as r:
+        disp = r.headers.get("Content-Disposition", "")
+        file_lines = [l for l in r.read().decode().splitlines() if l]
+    check("the finished export has the same rows as the streamed CSV",
+          job.get("state") == "done" and job.get("parts") == 1
+          and file_lines == stream_lines and len(file_lines) > 1
+          and job.get("rows") == len(file_lines) - 1
+          and "firewall-log-UDM-Test-" in disp and disp.endswith('.csv"'),
+          f"{job} file={len(file_lines)} stream={len(stream_lines)} {disp}")
+    _, lst, _ = request("GET", "/api/exports")
+    check("the export is listed for its owner (and stays fetchable)",
+          [j["id"] for j in lst.get("exports", [])] == [jid], str(lst))
+    code, _, _ = request("POST", "/api/exports", {"query": "window=abc"},
+                         csrf=True)
+    check("an export with a bad range is refused (400)", code == 400,
+          str(code))
+    code, _, _ = request("POST", "/api/exports", {"query": "window=60"})
+    check("starting an export needs the CSRF token (403)", code == 403,
+          str(code))
+    code, _, _ = request("DELETE", f"/api/exports/{jid}", csrf=True)
+    code2, _, _ = request("GET", f"/api/exports/{jid}/file")
+    check("closing an export deletes it (then 404)",
+          code == 200 and code2 == 404, f"{code} {code2}")
+    exp_dir = os.path.join(os.path.dirname(db_path), "exports")
+    check("the export's files are removed from the data folder",
+          os.path.isdir(exp_dir) and os.listdir(exp_dir) == [],
+          str(os.listdir(exp_dir) if os.path.isdir(exp_dir) else "missing"))
+
     print("== logout ==")
     code, _ = op2_json("/api/logout", None, csrf=v_csrf)
     check("logout succeeds (200)", code == 200, str(code))
@@ -1705,6 +1752,73 @@ def main():
     del h.connection
     check("csv export stops scanning once the client has disconnected",
           calls["n"] == 1, f"queries={calls['n']}")
+
+    import exports as expmod
+    import zipfile as zipmod
+    exp_work = os.path.join(os.path.dirname(db_path), "unit-exports")
+    os.makedirs(os.path.join(exp_work, "stale"), exist_ok=True)
+    em = expmod.ExportManager(db_path, exp_work, webmod._to_csv, part_rows=3,
+                              max_parts=2, max_running=2, keep_sec=60,
+                              scan_span=4, page=2)
+    check("export manager clears leftovers from a previous run",
+          os.listdir(exp_work) == [], str(os.listdir(exp_work)))
+
+    def wait_job(j):
+        for _ in range(200):
+            if j.state != "running":
+                return j
+            time.sleep(0.05)
+        return j
+    j = wait_job(em.start(7, 0, None, {"device": None}))
+    names, part_lens = [], []
+    if j.path and j.path.endswith(".zip"):
+        with zipmod.ZipFile(j.path) as z:
+            names = z.namelist()
+            part_lens = [len([l for l in z.read(n).decode().splitlines() if l])
+                         for n in names]
+    check("a large export is split into parts of part_rows in a ZIP, capped "
+          "at max_parts and flagged as truncated",
+          j.state == "done" and j.parts == 2 and j.rows == 6 and j.truncated
+          and len(names) == 2 and part_lens == [4, 4]
+          and names[0].endswith("-part01.csv")
+          and j.oldest_ts <= j.newest_ts,
+          f"{j.public()} {names} {part_lens}")
+    em2 = expmod.ExportManager(db_path, exp_work + "-2", webmod._to_csv,
+                               scan_span=4, page=2)
+    j2 = wait_job(em2.start(7, 0, None, {"src": src0}))
+    with open(j2.path, encoding="utf-8") as f:
+        rows2 = [l for l in f.read().splitlines() if l]
+    check("a sparse filter yields one complete CSV (not truncated)",
+          j2.state == "done" and j2.parts == 1 and not j2.truncated
+          and j2.path.endswith(".csv") and len(rows2) == len(want_rows) + 1
+          and j2.rows == len(want_rows) and j2.progress == 1.0,
+          f"{j2.public()} lines={len(rows2)} want={len(want_rows)}")
+    j3 = wait_job(em.start(7, int(time.time()) + 3600, None, {}))
+    with open(j3.path, encoding="utf-8") as f:
+        rows3 = f.read().splitlines()
+    check("an export with no matches is a header-only CSV",
+          j3.state == "done" and j3.rows == 0 and len(rows3) == 1
+          and rows3[0].startswith("time,"), f"{j3.public()} {rows3}")
+    check("jobs are private to their owner",
+          em.get(8, j.id) is None and not em.remove(8, j.id)
+          and [x.id for x in em.list(8)] == []
+          and [x.id for x in em.list(7)] == [j.id, j3.id])
+    em.remove(7, j.id)
+    check("removing a finished export deletes its files",
+          not os.path.exists(os.path.dirname(j.path)) and em.get(7, j.id) is None)
+    em.sweep(now=time.time() + 120)
+    check("finished exports expire after keep_sec (files deleted)",
+          em.list(7) == [] and os.listdir(exp_work) == [],
+          str(os.listdir(exp_work)))
+    em2.remove(7, j2.id)
+    em0 = expmod.ExportManager(db_path, exp_work, webmod._to_csv,
+                               max_running=0)
+    try:
+        em0.start(7, 0, None, {})
+        busy = False
+    except expmod.ExportBusy:
+        busy = True
+    check("no more than max_running exports run at once", busy)
     st_unit._db.close() if st_unit._db else None
     try:
         webmod.parse_trusted_proxies("not-an-ip")

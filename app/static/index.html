@@ -324,6 +324,20 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 .modal .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
 .modal button.primary { color:#fff; background:var(--accent); border:0; }
 .modal button.primary.danger { background:var(--critical); }
+.exp-panel { position:fixed; right:16px; bottom:16px; z-index:40;
+  width:min(360px, calc(100vw - 32px)); display:none; flex-direction:column; gap:8px; }
+.exp-panel.open { display:flex; }
+.exp-item { background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  padding:11px 13px; font-size:12.5px; box-shadow:0 6px 24px rgba(0,0,0,0.25); }
+.exp-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.exp-title { font-weight:600; overflow-wrap:anywhere; }
+.exp-what { color:var(--muted); margin-top:2px; overflow-wrap:anywhere; }
+.exp-bar { height:5px; border-radius:3px; background:var(--grid); margin:9px 0 6px; overflow:hidden; }
+.exp-bar > div { height:100%; width:0; background:var(--accent); transition:width .4s; }
+.exp-status { color:var(--ink-2); }
+.exp-status.warn { color:var(--critical); }
+.exp-actions { display:flex; gap:12px; justify-content:flex-end; margin-top:8px; }
+.exp-x { background:none; border:0; padding:0 2px; color:var(--muted); cursor:pointer; font-size:16px; line-height:1; }
 .modal-back.stacked { z-index:70; }   /* confirm / prompt above a management modal */
 .modal .msg { display:none; margin-top:12px; padding:8px 11px; border-radius:9px;
   background:var(--tint-bad); border:1px solid var(--critical); font-size:12.5px; }
@@ -503,6 +517,9 @@ a.menu-src { color:var(--muted); font-size:12.5px; }   /* AGPL §13 source offer
 <!-- Floating "back to live" control for phones, where the toolbar Pause /
      Jump-to-live button scrolls off with the page. -->
 <button id="toLive" data-init-hidden>↑ Jump to live</button>
+
+<!-- Background CSV exports: progress, cancel, and the finished download. -->
+<div class="exp-panel" id="expPanel" aria-live="polite"></div>
 
 <!-- Change-password modal -->
 <div class="modal-back" id="pwModal">
@@ -2517,6 +2534,115 @@ fetch("/flags/names.json").then(r => r.ok ? r.json() : {}).then(m => {
 // While a password change is pending the server answers 403 to every data
 // route, so the pollers only start once /api/me says the account is clear.
 // (After the change the client signs in again and boots fresh.)
+/* ---------------- Background CSV export ----------------
+   Download CSV starts a server-side export job instead of a long-running
+   download: the panel shows how far back it has searched, the dashboard
+   stays fast meanwhile, and the file is fetched once it's ready (split into
+   parts in a ZIP when it's larger than one spreadsheet can hold). */
+const expAutoGet = new Set();   // jobs started from this page: fetch when done
+const expFetched = new Set();   // jobs whose file this page has fetched
+let expTimer = null, expJobs = [];
+function expWhen(ts) {
+  return new Date(ts * 1000).toLocaleString([], { day: "numeric", month: "short",
+    hour: "2-digit", minute: "2-digit" });
+}
+function expWhat(j) {
+  const f = Object.assign({}, j.filters); delete f.device;
+  const parts = Object.keys(f).map(k => `${k} ${f[k]}`);
+  const range = j.end_ts ? `${expWhen(j.start_ts)} → ${expWhen(j.end_ts)}`
+                         : `since ${expWhen(j.start_ts)}`;
+  return [range].concat(parts).join(" · ");
+}
+function expFetch(j) {
+  expFetched.add(j.id);
+  const a = document.createElement("a");
+  a.href = `/api/exports/${encodeURIComponent(j.id)}/file`;
+  a.download = j.filename || "";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function expRender() {
+  const panel = $("expPanel");
+  const shown = expJobs;
+  panel.classList.toggle("open", shown.length > 0);
+  panel.innerHTML = shown.map(j => {
+    let status, cls = "", actions = "";
+    if (j.state === "running") {
+      const back = j.reached_ts ? ` · back to ${esc(expWhen(j.reached_ts))}` : "";
+      status = `Searching… ${Math.floor(j.progress * 100)}%${back} · ${fmt(j.rows)} rows found`;
+      actions = `<button class="linkbtn" data-exp-cancel="${esc(j.id)}">Cancel</button>`;
+    } else if (j.state === "done") {
+      const files = j.parts > 1 ? ` in ${j.parts} files (ZIP)` : "";
+      status = `${expFetched.has(j.id) ? "Downloaded" : "Ready"}: ${fmt(j.rows)} rows${files}.`;
+      if (j.truncated) {
+        cls = " warn";
+        status += ` Reached the ${fmt(j.max_rows)}-row limit: the files cover`
+          + ` ${esc(expWhen(j.oldest_ts))} → ${esc(expWhen(j.newest_ts))}.`
+          + " Narrow the filters or the time range for the rest.";
+      }
+      actions = `<button class="linkbtn" data-exp-get="${esc(j.id)}">`
+        + `${expFetched.has(j.id) ? "Download again" : "Download"}</button>`;
+    } else {
+      cls = " warn"; status = esc(j.error || "The export failed.");
+    }
+    return `<div class="exp-item"><div class="exp-head"><div>`
+      + `<div class="exp-title">CSV export · ${esc(j.filters.device || "all systems")}</div>`
+      + `<div class="exp-what">${esc(expWhat(j))}</div></div>`
+      + `<button class="exp-x" data-exp-close="${esc(j.id)}" title="${j.state === "running" ? "Cancel" : "Close"}" aria-label="Close">×</button></div>`
+      + (j.state === "running" ? `<div class="exp-bar"><div data-exp-bar="${esc(j.id)}"></div></div>` : "")
+      + `<div class="exp-status${cls}">${status}</div>`
+      + `<div class="exp-actions">${actions}</div></div>`;
+  }).join("");
+  // Width via CSSOM: the CSP forbids inline style attributes.
+  for (const j of shown) {
+    const bar = panel.querySelector(`[data-exp-bar="${CSS.escape(j.id)}"]`);
+    if (bar) bar.style.width = `${Math.max(2, j.progress * 100)}%`;
+  }
+}
+async function expPoll() {
+  let r;
+  try { r = await fetch("/api/exports"); } catch (e) { return; }
+  if (gone(r) || !r.ok) return;
+  expJobs = (await r.json()).exports || [];
+  for (const j of expJobs) {
+    if (j.state === "done" && expAutoGet.has(j.id) && !expFetched.has(j.id)) {
+      expAutoGet.delete(j.id); expFetch(j);
+      // A complete export needs no further attention: confirm, then tidy up
+      // (closing also deletes the file on the server). A capped one stays
+      // until closed so its coverage note isn't missed.
+      if (!j.truncated) setTimeout(() => expClose(j.id), 10000);
+    }
+  }
+  expRender();
+  const running = expJobs.some(j => j.state === "running");
+  clearTimeout(expTimer);
+  expTimer = running ? setTimeout(expPoll, 1500) : null;
+}
+async function expStart(ev) {
+  ev.preventDefault();
+  const p = filterQuery(); applyWindow(p);
+  const r = await apiSend("POST", "/api/exports", { query: p.toString() });
+  if (gone(r)) return;
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { showError(new Error(data.error || "could not start the export")); return; }
+  expAutoGet.add(data.id);
+  expPoll();
+}
+async function expClose(id) {
+  expAutoGet.delete(id);
+  expJobs = expJobs.filter(j => j.id !== id); expRender();
+  const r = await apiSend("DELETE", `/api/exports/${encodeURIComponent(id)}`);
+  gone(r);
+}
+$("csvLink").addEventListener("click", expStart);
+$("expPanel").addEventListener("click", ev => {
+  const t = ev.target.closest("[data-exp-cancel],[data-exp-close],[data-exp-get]");
+  if (!t) return;
+  if (t.dataset.expGet) {
+    const j = expJobs.find(x => x.id === t.dataset.expGet);
+    if (j) { expFetch(j); expRender(); }
+  } else expClose(t.dataset.expCancel || t.dataset.expClose);
+});
+
 function pwGate() { return !!(me && (me.must_change_pw || (me.totp_required && !me.totp_enabled))); }
 (async () => {
   await loadMe();
@@ -2525,6 +2651,7 @@ function pwGate() { return !!(me && (me.must_change_pw || (me.totp_required && !
   fetchLayout();           // overview grouping/order (re-renders when it lands)
   setInterval(loadStats, 5000);
   restoreFromUrl(false);   // land on the view + filters encoded in the URL (if any)
+  expPoll();               // an export still running (or ready) from before a reload
 })();
 </script>
 </body>

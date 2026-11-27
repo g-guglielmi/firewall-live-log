@@ -402,7 +402,10 @@ of `window`: `from=<epoch>` (and optional `to=<epoch>`, both in seconds).
   `since`; `since=0` backfills recent activity. Empty poll returns the same
   cursor and `[]`.
 - **`GET /api/events.csv`** → CSV with a header row (`time,device,vendor,src,
-  dst,proto,dst_port,action,rule`); `time` is local, uncapped by row limit.
+  dst,proto,dst_port,action,rule`), streamed newest first; `time` is local.
+  It returns at most `limit` rows (default 100,000, max 500,000) and simply
+  ends there: if you get exactly `limit` rows, older matches may remain, so
+  continue with a custom range (`to=` the oldest time you received).
 - **`GET /api/stats`** → totals, per-device activity, `oldest`/`newest`
   timestamps, `db_bytes`, retention, and `now` (server epoch). Fleet-wide
   and per-device `events_last_min` / `blocked_last_min` are rolling 60-second
@@ -461,11 +464,22 @@ between live tail and a historical window. Both live and window queries are
 bounded so they stay fast regardless of database size, and the window view
 shows a *querying…* indicator while it loads. A history window shows the
 newest matches first with a **Load older** button to page further back;
-for the *complete* filtered window, use **Download CSV** (uncapped). A
-rare match over a long window (a few rows in a week of traffic) takes as
-long to export as it takes the table to page through it; the rest of the
-dashboard stays usable meanwhile, and cancelling the download stops the
-scan.
+for the *complete* filtered window, use **Download CSV**.
+
+**Download CSV** runs in the background. A panel in the bottom-right corner
+shows how far back the search has got (*Searching… 37% · back to 26 Nov
+14:00 · 412 rows found*) with a **Cancel** link, and the file downloads by
+itself when it's ready; the dashboard stays fully usable meanwhile, and a
+reload brings the panel back. A text filter (IP, rule, …) that matches
+rarely has to read every event in the window, so on a busy fleet a week can
+take many minutes; a shorter window is proportionally faster. Results larger
+than 500,000 rows are split into parts of 500,000 (each opens in a
+spreadsheet) and delivered as one ZIP. An export stops at 5,000,000 rows
+(10 parts): if it gets there, the panel says which time span the files
+cover so you can export the rest with a narrower range. Finished files are
+kept in an `exports/` folder next to the events DB until you close the
+panel entry (a complete download closes itself after 10 seconds) or for 15
+minutes; up to two exports run at once.
 Whenever the visible rows span more than the current day, a date separator
 row marks each day boundary.
 
@@ -813,7 +827,8 @@ completely open.
   ```
 - **Files are owner-only.** The databases and their WAL/SHM sidecars are
   created `0600` (and existing ones are tightened on start); `layout.json`
-  likewise. The seeded `devices.json` stays `0644` so you can read and edit
+  likewise. CSV exports are written into an `exports/` folder that only the
+  app's user can open (`0700`), emptied on every start. The seeded `devices.json` stays `0644` so you can read and edit
   it from the host.
 - **Supply chain.** The base image is pinned by digest and every GitHub
   Action by commit SHA (Dependabot proposes bumps); the image build applies
